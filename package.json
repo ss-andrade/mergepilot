@@ -12,8 +12,9 @@
     "dev:desktop": "npm run dev -w @mergepilot/desktop",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "smoke": "npm run build && node scripts/smoke-desktop.mjs",
-    "verify": "npm run typecheck && npm run smoke"
+    "test": "npm run test --workspaces --if-present",
+    "smoke": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-agents.mjs",
+    "verify": "npm run typecheck && npm run test && npm run smoke"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
