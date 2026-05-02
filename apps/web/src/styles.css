@@ -141,7 +141,8 @@ h3 {
   margin-bottom: 28px;
 }
 
-.workspace-header button {
+.workspace-header button,
+.inline-button {
   min-width: 150px;
   padding: 11px 16px;
   border: 0;
@@ -150,6 +151,32 @@ h3 {
   background: #1f6feb;
   font-weight: 700;
   cursor: pointer;
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.workspace-header .secondary-button,
+.inline-button {
+  min-width: auto;
+  color: #1d2735;
+  background: #e8edf5;
+}
+
+.inline-button {
+  margin-top: 12px;
+}
+
+.error-banner {
+  padding: 12px 14px;
+  border: 1px solid #f2b8b5;
+  border-radius: 8px;
+  color: #8c1d18;
+  background: #fff4f2;
 }
 
 .summary-band {
@@ -260,7 +287,8 @@ h3 {
     display: grid;
   }
 
-  .workspace-header button {
+  .workspace-header button,
+  .header-actions {
     width: 100%;
   }
 }

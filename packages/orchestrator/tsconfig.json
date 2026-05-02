@@ -2,14 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": false,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",
     "rootDir": "src",
     "noEmit": false,
-    "isolatedModules": false,
-    "types": ["node", "electron"]
+    "types": ["node", "vitest/globals"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "src/**/*.test.ts"]
+  "exclude": ["dist", "test"]
 }
