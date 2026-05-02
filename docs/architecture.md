@@ -4,6 +4,17 @@
 
 MergePilot should be PR-native and event-sourced enough that every user-facing claim can be traced to a plan, event, command, diff, check, review, or human decision.
 
+## Accepted MVP stack
+
+MergePilot starts as a local-first **Electron desktop app** with a React/Vite renderer, local Node/TypeScript orchestrator, SQLite persistence, and an adapter system for coding-agent CLIs.
+
+The first built-in coding-agent adapters are:
+
+- Claude Code CLI
+- OpenAI Codex CLI
+
+Workstream orchestration should depend on a generic `AgentAdapter` contract, not on provider-specific logic. See [`tech-stack.md`](tech-stack.md) for the full decision.
+
 ## First-pass components
 
 ```text
@@ -12,18 +23,22 @@ Web App
   ├─ Event Timeline
   ├─ Human Attention Queue
   └─ PR/CI Summary Views
-
-API / Orchestrator
+Local Orchestrator Backend
   ├─ Workstream Service
-  ├─ Coordinator Service
+  ├─ Event Log Service
+  ├─ Plan Service
   ├─ Agent Run Service
   ├─ GitHub Integration
+  ├─ Agent Adapter Registry
   ├─ Event Log
   └─ Context/Skill Store
 
 Execution Layer
   ├─ Isolated workspaces / worktrees
-  ├─ Coding-agent runner
+  ├─ Claude Code adapter
+  ├─ Codex adapter
+  ├─ Future coding-agent adapters
+  ├─ PTY/process supervisor
   ├─ Command/test capture
   └─ Branch/commit/PR creation
 ```

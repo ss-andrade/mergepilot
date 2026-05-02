@@ -49,7 +49,9 @@ GitHub PR delivery for scoped repo tasks:
 - [`docs/product-brief.md`](docs/product-brief.md) — full product brief and naming research
 - [`docs/mvp.md`](docs/mvp.md) — initial MVP scope and milestones
 - [`docs/architecture.md`](docs/architecture.md) — first-pass architecture and data model
+- [`docs/tech-stack.md`](docs/tech-stack.md) — accepted MVP stack: Electron + local orchestrator + coding-agent adapters
 - [`docs/plans/2026-05-02-repo-bootstrap.md`](docs/plans/2026-05-02-repo-bootstrap.md) — implementation plan for the repo bootstrap
+- [`docs/plans/2026-05-02-issue-1-tech-stack.md`](docs/plans/2026-05-02-issue-1-tech-stack.md) — implementation plan for Issue #1
 
 ## Status
 
