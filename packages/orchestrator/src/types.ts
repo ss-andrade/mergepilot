@@ -1,0 +1,102 @@
+export type WorkstreamStatus = "active" | "paused" | "completed" | "archived";
+export type PlanStatus = "draft" | "approved" | "rejected" | "superseded";
+export type AgentRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type OrchestratorState = "stopped" | "running";
+
+export interface Workstream {
+  id: string;
+  title: string;
+  description: string | null;
+  repositoryPath: string | null;
+  status: WorkstreamStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorkstreamInput {
+  title: string;
+  description?: string | null;
+  repositoryPath?: string | null;
+}
+
+export interface WorkstreamEvent {
+  id: string;
+  workstreamId: string;
+  sequence: number;
+  type: string;
+  message: string;
+  payload: unknown | null;
+  createdAt: string;
+}
+
+export interface AppendWorkstreamEventInput {
+  workstreamId: string;
+  type: string;
+  message: string;
+  payload?: unknown;
+}
+
+export interface Plan {
+  id: string;
+  workstreamId: string;
+  title: string;
+  body: string;
+  status: PlanStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreatePlanInput {
+  workstreamId: string;
+  title: string;
+  body: string;
+  status?: PlanStatus;
+}
+
+export interface AgentRun {
+  id: string;
+  workstreamId: string;
+  providerId: string;
+  adapterId: string | null;
+  role: string;
+  status: AgentRunStatus;
+  goal: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAgentRunInput {
+  workstreamId: string;
+  providerId: string;
+  adapterId?: string | null;
+  role: string;
+  status?: AgentRunStatus;
+  goal: string;
+}
+
+export interface OrchestratorStore {
+  createWorkstream(input: CreateWorkstreamInput): Workstream;
+  listWorkstreams(): Workstream[];
+  getWorkstream(id: string): Workstream | null;
+  appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent;
+  listEvents(workstreamId: string): WorkstreamEvent[];
+  createPlan(input: CreatePlanInput): Plan;
+  listPlans(workstreamId: string): Plan[];
+  createAgentRun(input: CreateAgentRunInput): AgentRun;
+  listAgentRuns(workstreamId: string): AgentRun[];
+  close(): void;
+}
+
+export interface OrchestratorStatus {
+  state: OrchestratorState;
+  dataDir: string;
+  databasePath: string;
+}
+
+export interface LocalOrchestratorService extends Omit<OrchestratorStore, "close"> {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  status(): OrchestratorStatus;
+}

@@ -1,7 +1,14 @@
 import { app, BrowserWindow, ipcMain } from "electron";
+import { createLocalOrchestrator } from "@mergepilot/orchestrator";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { registerOrchestratorIpcHandlers } from "./orchestrator-ipc.js";
 
 const rendererDevServerUrl = process.env.VITE_DEV_SERVER_URL;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const orchestrator = createLocalOrchestrator({
+  dataDir: path.join(app.getPath("userData"), "orchestrator")
+});
 
 function getPreloadPath(): string {
   return path.join(__dirname, "../preload/preload.js");
@@ -43,10 +50,14 @@ function registerIpcHandlers(): void {
     electronVersion: process.versions.electron,
     platform: process.platform
   }));
+  registerOrchestratorIpcHandlers(ipcMain, orchestrator);
 }
 
 app.whenReady().then(async () => {
   registerIpcHandlers();
+  if (rendererDevServerUrl) {
+    await orchestrator.start();
+  }
   await createMainWindow();
 
   app.on("activate", async () => {
@@ -54,6 +65,10 @@ app.whenReady().then(async () => {
       await createMainWindow();
     }
   });
+});
+
+app.on("before-quit", () => {
+  void orchestrator.stop();
 });
 
 app.on("window-all-closed", () => {
