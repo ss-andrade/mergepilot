@@ -6,12 +6,18 @@ import { registerOrchestratorIpcHandlers } from "./orchestrator-ipc.js";
 
 const rendererDevServerUrl = process.env.VITE_DEV_SERVER_URL;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const userDataDirOverride = process.env.MERGEPILOT_USER_DATA_DIR;
+
+if (userDataDirOverride) {
+  app.setPath("userData", userDataDirOverride);
+}
+
 const orchestrator = createLocalOrchestrator({
   dataDir: path.join(app.getPath("userData"), "orchestrator")
 });
 
 function getPreloadPath(): string {
-  return path.join(__dirname, "../preload/preload.js");
+  return path.join(__dirname, "../preload/preload.cjs");
 }
 
 function getRendererIndexPath(): string {
