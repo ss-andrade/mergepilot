@@ -116,6 +116,50 @@ The Claude adapter keeps local CLI calls bounded:
 - command lifecycle events redact the prompt and provider-native resume session id;
 - `defaultMaxTurns`, `metadata.claudeMaxTurns`, and `metadata.maxTurns` are capped at 50.
 
+## Codex Adapter
+
+The OpenAI Codex adapter lives in `packages/codex-adapter` and exports `CodexAdapter` from `@mergepilot/codex-adapter`.
+
+It detects the local `codex` binary with `codex --version`, performs a bounded health check with `codex exec`, and starts one-shot runs in a workspace path with:
+
+```sh
+codex exec --sandbox workspace-write "<task>"
+```
+
+Register it at the application composition boundary:
+
+```ts
+import { createAgentAdapterRegistry } from "@mergepilot/agents";
+import { CodexAdapter } from "@mergepilot/codex-adapter";
+
+const registry = createAgentAdapterRegistry();
+
+registry.register(
+  new CodexAdapter({
+    adapterId: "codex-local",
+    sandbox: "workspace-write",
+    defaultArgs: ["--model", "gpt-5.2"],
+  }),
+);
+```
+
+The adapter joins `AgentRunInput.session.handoff`, `goal`, and `instructions` into the final task prompt and passes it as the last argv item. Command events redact that final prompt before orchestration or UI code sees it. Additional `defaultArgs` are inserted before the task prompt, so callers can configure stable non-secret CLI flags without string concatenation.
+
+Codex process execution is isolated behind an injected runner. The default runner uses `spawn(command, args)` without a shell, streams stdout and stderr chunks as normalized `artifactType: "log"` events, and maps process cancellation to a `cancelled` result. The runner boundary also supports future PTY supervision: custom runners can emit stdout, stderr, and `waiting-for-input` events while still returning a final bounded result.
+
+Waiting-for-input states are surfaced as lifecycle `running` events with the message `Codex is waiting for input.`. This keeps the provider-neutral contract unchanged while giving workstream UI enough signal to pause, request operator action, or mark a run as blocked.
+
+The Codex adapter keeps local CLI calls bounded:
+
+- detection runs use `detectTimeoutMs`, defaulting to 5 seconds;
+- health checks use `healthTimeoutMs`, defaulting to 30 seconds;
+- health details report whether the CLI is installed and whether auth appears authenticated, unauthenticated, or unknown;
+- run output buffers are capped by `maxBufferBytes`, defaulting to 1 MiB per stream;
+- post-run diff evidence collection uses `diffTimeoutMs`, defaulting to 5 seconds;
+- run cancellation aborts the active process and resolves the run as `cancelled`;
+- command lifecycle events redact the task prompt;
+- after a successful real CLI run, the runner collects bounded `git diff --no-ext-diff --no-color` evidence in the workspace and emits it as a `diff` artifact when available; detection and health checks do not collect diffs.
+
 ## Session Continuation
 
 Adapters that can resume provider-native sessions should declare `capabilities.sessionResume`. Orchestration passes continuation context through `AgentRunInput.session`:
