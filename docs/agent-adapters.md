@@ -77,6 +77,45 @@ const metadata = registry.listMetadata();
 const adapter = registry.require("future-agent");
 ```
 
+## Claude Code Adapter
+
+The first concrete adapter lives in `packages/claude-code-adapter` and exports `ClaudeCodeAdapter` from `@mergepilot/claude-code-adapter`.
+
+It detects the local `claude` binary with `claude --version`, performs a bounded print-mode health check, and starts one-shot runs with:
+
+```sh
+claude -p "<task>" --output-format json --max-turns <n>
+```
+
+Register it at the application composition boundary:
+
+```ts
+import { createAgentAdapterRegistry } from "@mergepilot/agents";
+import { ClaudeCodeAdapter } from "@mergepilot/claude-code-adapter";
+
+const registry = createAgentAdapterRegistry();
+
+registry.register(
+  new ClaudeCodeAdapter({
+    adapterId: "claude-code-local",
+    defaultMaxTurns: 3,
+  }),
+);
+```
+
+The adapter reads bounded turn count from `AgentRunInput.metadata.claudeMaxTurns`, falling back to `metadata.maxTurns` and then the configured default. If `AgentRunInput.session.resumeSessionId` is present, it passes that value to Claude with `--resume`; if Claude JSON output includes `session_id`, the adapter returns it as `AgentRunResult.session.sessionId`.
+
+Claude-specific process execution is isolated behind a small injected runner so tests and future orchestration code can fake CLI responses without requiring a real Claude installation or authenticated account.
+
+The Claude adapter keeps local CLI calls bounded:
+
+- detection runs use `detectTimeoutMs`, defaulting to 5 seconds;
+- health checks use `healthTimeoutMs`, defaulting to 30 seconds;
+- run output buffers are capped by `maxBufferBytes`, defaulting to 1 MiB per stream;
+- run cancellation aborts the active process and resolves the run as `cancelled`;
+- command lifecycle events redact the prompt and provider-native resume session id;
+- `defaultMaxTurns`, `metadata.claudeMaxTurns`, and `metadata.maxTurns` are capped at 50.
+
 ## Session Continuation
 
 Adapters that can resume provider-native sessions should declare `capabilities.sessionResume`. Orchestration passes continuation context through `AgentRunInput.session`:
