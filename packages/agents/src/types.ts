@@ -1,18 +1,27 @@
 export type AgentProviderId = string;
 
+export type AgentAdapterInstanceId = string;
+
 export type AgentRunRole = "coordinator" | "build" | "review";
 
 export interface AgentAdapterCapabilities {
   streamingEvents: boolean;
   cancellation: boolean;
   structuredResults: boolean;
+  sessionResume: boolean;
 }
 
 export interface AgentAdapterMetadata {
+  /**
+   * Stable registry key for this configured adapter instance. Defaults to
+   * `providerId` when omitted so single-instance providers stay simple.
+   */
+  adapterId?: AgentAdapterInstanceId;
   providerId: AgentProviderId;
   displayName: string;
   version?: string;
   capabilities: AgentAdapterCapabilities;
+  labels?: readonly string[];
 }
 
 export interface AgentProviderDetectionInput {
@@ -64,7 +73,24 @@ export interface AgentRunInput {
   baseBranch?: string;
   instructions?: string;
   env?: Readonly<Record<string, string | undefined>>;
+  session?: AgentRunSessionInput;
   metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface AgentRunSessionInput {
+  /**
+   * Provider-neutral lookup key for persisted continuation state. Callers can
+   * scope this to a task, chat, or workstream without leaking provider ids.
+   */
+  sessionKey?: string;
+  /**
+   * Provider-native continuation id from a previous result.
+   */
+  resumeSessionId?: string;
+  /**
+   * Optional handoff text prepended by adapters that support resumable context.
+   */
+  handoff?: string;
 }
 
 export type AgentRunLifecycleStatus =
@@ -128,18 +154,28 @@ export type AgentRunResultStatus = "completed" | "failed" | "cancelled";
 export interface AgentRunResult {
   runId: string;
   providerId: AgentProviderId;
+  adapterId?: AgentAdapterInstanceId;
   status: AgentRunResultStatus;
   summary?: string;
   errorMessage?: string;
   startedAt: string;
   completedAt: string;
+  session?: AgentRunSessionResult;
   artifacts?: readonly AgentRunArtifactEvent[];
+  metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface AgentRunSessionResult {
+  sessionId: string;
+  sessionKey?: string;
+  expiresAt?: string;
   metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface AgentRunHandle {
   runId: string;
   providerId: AgentProviderId;
+  adapterId?: AgentAdapterInstanceId;
   events: AsyncIterable<AgentRunEvent>;
   result: Promise<AgentRunResult>;
   cancel(): Promise<void>;

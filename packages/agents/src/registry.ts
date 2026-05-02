@@ -1,35 +1,40 @@
 import type {
   AgentAdapter,
+  AgentAdapterInstanceId,
   AgentAdapterMetadata,
-  AgentProviderId,
 } from "./types.js";
 
 export class AgentAdapterRegistry {
-  readonly #adapters = new Map<AgentProviderId, AgentAdapter>();
+  readonly #adapters = new Map<AgentAdapterInstanceId, AgentAdapter>();
 
   register(adapter: AgentAdapter): void {
     const { providerId } = adapter.metadata;
+    const adapterId = resolveAdapterId(adapter.metadata);
 
     if (!providerId) {
       throw new Error("Agent adapter providerId is required.");
     }
 
-    if (this.#adapters.has(providerId)) {
-      throw new Error(`Agent adapter '${providerId}' is already registered.`);
+    if (!adapterId) {
+      throw new Error("Agent adapter adapterId is required.");
     }
 
-    this.#adapters.set(providerId, adapter);
+    if (this.#adapters.has(adapterId)) {
+      throw new Error(`Agent adapter '${adapterId}' is already registered.`);
+    }
+
+    this.#adapters.set(adapterId, adapter);
   }
 
-  get(providerId: AgentProviderId): AgentAdapter | undefined {
-    return this.#adapters.get(providerId);
+  get(adapterId: AgentAdapterInstanceId): AgentAdapter | undefined {
+    return this.#adapters.get(adapterId);
   }
 
-  require(providerId: AgentProviderId): AgentAdapter {
-    const adapter = this.get(providerId);
+  require(adapterId: AgentAdapterInstanceId): AgentAdapter {
+    const adapter = this.get(adapterId);
 
     if (!adapter) {
-      throw new Error(`Agent adapter '${providerId}' is not registered.`);
+      throw new Error(`Agent adapter '${adapterId}' is not registered.`);
     }
 
     return adapter;
@@ -42,11 +47,19 @@ export class AgentAdapterRegistry {
   listMetadata(): AgentAdapterMetadata[] {
     return this.list().map((adapter) => ({
       ...adapter.metadata,
+      adapterId: resolveAdapterId(adapter.metadata),
       capabilities: { ...adapter.metadata.capabilities },
+      labels: adapter.metadata.labels ? [...adapter.metadata.labels] : undefined,
     }));
   }
 }
 
 export function createAgentAdapterRegistry(): AgentAdapterRegistry {
   return new AgentAdapterRegistry();
+}
+
+function resolveAdapterId(
+  metadata: AgentAdapterMetadata,
+): AgentAdapterInstanceId {
+  return metadata.adapterId ?? metadata.providerId;
 }
