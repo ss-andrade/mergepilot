@@ -6,7 +6,7 @@ const repoRoot = path.dirname(fileURLToPath(import.meta.url)).replace(`${path.se
 
 const requiredFiles = [
   "apps/desktop/dist/main/main.js",
-  "apps/desktop/dist/preload/preload.js",
+  "apps/desktop/dist/preload/preload.cjs",
   "apps/web/dist/index.html",
   "apps/web/dist/assets"
 ];
@@ -20,7 +20,7 @@ const mainSource = await readFile(
   "utf8"
 );
 const preloadSource = await readFile(
-  path.join(repoRoot, "apps/desktop/dist/preload/preload.js"),
+  path.join(repoRoot, "apps/desktop/dist/preload/preload.cjs"),
   "utf8"
 );
 const rendererIndex = await readFile(path.join(repoRoot, "apps/web/dist/index.html"), "utf8");

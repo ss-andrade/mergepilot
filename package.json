@@ -13,10 +13,18 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:renderer": "npm run test:e2e:web",
+    "test:e2e:web": "playwright test -c playwright.renderer.config.ts",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3 -v $(node -p \"require('electron/package.json').version\")",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "test:e2e:electron": "npm run build && node scripts/preflight-electron-linux.mjs && npm run rebuild:electron && playwright test -c playwright.electron.config.ts; status=$?; npm run rebuild:node; restore=$?; if [ $status -ne 0 ]; then exit $status; fi; exit $restore",
+    "verify:runtime": "npm run test:e2e:web && npm run test:e2e:electron",
     "smoke": "npm run build && node scripts/smoke-desktop.mjs && node scripts/smoke-agents.mjs",
     "verify": "npm run typecheck && npm run test && npm run smoke"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@playwright/test": "^1.59.1",
     "@types/node": "^22.15.3",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
