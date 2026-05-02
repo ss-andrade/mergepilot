@@ -50,9 +50,28 @@ GitHub PR delivery for scoped repo tasks:
 - [`docs/mvp.md`](docs/mvp.md) — initial MVP scope and milestones
 - [`docs/architecture.md`](docs/architecture.md) — first-pass architecture and data model
 - [`docs/tech-stack.md`](docs/tech-stack.md) — accepted MVP stack: Electron + local orchestrator + coding-agent adapters
+- [`docs/desktop-shell.md`](docs/desktop-shell.md) — Electron main/preload/renderer boundaries and local commands
 - [`docs/plans/2026-05-02-repo-bootstrap.md`](docs/plans/2026-05-02-repo-bootstrap.md) — implementation plan for the repo bootstrap
 - [`docs/plans/2026-05-02-issue-1-tech-stack.md`](docs/plans/2026-05-02-issue-1-tech-stack.md) — implementation plan for Issue #1
 
+## Desktop app
+
+Install dependencies and start the Electron shell:
+
+```sh
+npm install
+npm run dev
+```
+
+Headless verification:
+
+```sh
+npm run typecheck
+npm run smoke
+```
+
+The desktop app uses an Electron main process in `apps/desktop`, a secure preload bridge exposed as `window.mergePilot`, and a React/Vite renderer in `apps/web`.
+
 ## Status
 
-Early product definition. No runtime implementation yet.
+Early product definition with the first Electron desktop shell scaffolded.
