@@ -1,0 +1,30 @@
+{
+  "name": "mergepilot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MergePilot desktop app workspace.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @mergepilot/desktop",
+    "dev:desktop": "npm run dev -w @mergepilot/desktop",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "smoke": "npm run build && node scripts/smoke-desktop.mjs",
+    "verify": "npm run typecheck && npm run smoke"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^35.2.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.4",
+    "wait-on": "^8.0.3"
+  }
+}
