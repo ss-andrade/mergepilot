@@ -13,7 +13,7 @@ The first built-in coding-agent adapters are:
 - Claude Code CLI
 - OpenAI Codex CLI
 
-Workstream orchestration should depend on a generic `AgentAdapter` contract, not on provider-specific logic. See [`tech-stack.md`](tech-stack.md) for the full decision.
+Workstream orchestration should depend on a generic `AgentAdapter` contract, not on provider-specific logic. The provider-neutral contract lives in `@mergepilot/agents`; see [`agent-adapters.md`](agent-adapters.md) for adapter shape and extension guidance, and [`tech-stack.md`](tech-stack.md) for the full stack decision.
 
 ## First-pass components
 

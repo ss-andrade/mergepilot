@@ -49,6 +49,7 @@ GitHub PR delivery for scoped repo tasks:
 - [`docs/product-brief.md`](docs/product-brief.md) — full product brief and naming research
 - [`docs/mvp.md`](docs/mvp.md) — initial MVP scope and milestones
 - [`docs/architecture.md`](docs/architecture.md) — first-pass architecture and data model
+- [`docs/agent-adapters.md`](docs/agent-adapters.md) — provider-neutral coding-agent adapter contract
 - [`docs/tech-stack.md`](docs/tech-stack.md) — accepted MVP stack: Electron + local orchestrator + coding-agent adapters
 - [`docs/desktop-shell.md`](docs/desktop-shell.md) — Electron main/preload/renderer boundaries and local commands
 - [`docs/plans/2026-05-02-repo-bootstrap.md`](docs/plans/2026-05-02-repo-bootstrap.md) — implementation plan for the repo bootstrap
@@ -67,6 +68,7 @@ Headless verification:
 
 ```sh
 npm run typecheck
+npm run test
 npm run smoke
 ```
 
