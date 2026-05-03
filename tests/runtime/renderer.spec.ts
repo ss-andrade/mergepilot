@@ -14,6 +14,21 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
     let running = false;
     let sequence = 0;
     const createCalls: CreateWorkstreamInput[] = [];
+    const plans: Plan[] = [
+      {
+        id: "plan-seeded",
+        workstreamId: "ws-seeded",
+        title: "Coordinator plan",
+        body: "Show canonical events for an existing workstream.\n\n- Inspect repository context.\n- Implement the renderer timeline.\n- Verify runtime coverage.",
+        goalRestatement: "Show canonical events for an existing workstream.",
+        steps: ["Inspect repository context.", "Implement the renderer timeline.", "Verify runtime coverage."],
+        risks: ["Timeline events must stay canonical."],
+        expectedOutputs: ["Visible implementation plan.", "Plan approval event."],
+        status: "draft",
+        createdAt: now,
+        updatedAt: now
+      }
+    ];
     const repositories: GitHubRepositoryConnection[] = [
       {
         id: "repo-existing",
@@ -197,6 +212,83 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           return created;
         },
         list: async (workstreamId) => events.filter((event) => event.workstreamId === workstreamId)
+      },
+      plans: {
+        propose: async ({ workstreamId }) => {
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          if (!workstream) {
+            throw new Error(`Missing workstream ${workstreamId}`);
+          }
+          const created: Plan = {
+            id: `plan-${plans.length + 1}`,
+            workstreamId,
+            title: "Coordinator plan",
+            body: `${workstream.goal}\n\n- Inspect repository context.\n- Implement the requested change.\n- Verify targeted checks.`,
+            goalRestatement: workstream.goal,
+            steps: ["Inspect repository context.", "Implement the requested change.", "Verify targeted checks."],
+            risks: ["Scope may need adjustment after inspection."],
+            expectedOutputs: ["Visible implementation plan.", "Timeline event."],
+            status: "draft",
+            createdAt: now,
+            updatedAt: now
+          };
+          plans.push(created);
+          workstream.status = "awaiting_plan_approval";
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "plan_created",
+            message: "Coordinator plan proposed.",
+            payload: { planId: created.id },
+            createdAt: now
+          });
+          sequence += 1;
+          return created;
+        },
+        list: async (workstreamId) => plans.filter((plan) => plan.workstreamId === workstreamId),
+        approve: async ({ workstreamId, planId }) => {
+          const plan = plans.find((item) => item.id === planId && item.workstreamId === workstreamId);
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          if (!plan || !workstream) {
+            throw new Error("Missing plan.");
+          }
+          plan.status = "approved";
+          plan.updatedAt = now;
+          workstream.status = "running";
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "plan_approved",
+            message: "Coordinator plan approved.",
+            payload: { planId, unlocksExecution: true },
+            createdAt: now
+          });
+          sequence += 1;
+          return plan;
+        },
+        reject: async ({ workstreamId, planId, reason }) => {
+          const plan = plans.find((item) => item.id === planId && item.workstreamId === workstreamId);
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          if (!plan || !workstream) {
+            throw new Error("Missing plan.");
+          }
+          plan.status = "rejected";
+          plan.updatedAt = now;
+          workstream.status = "planning";
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "human_action_required",
+            message: "Coordinator plan rejected.",
+            payload: { planId, reason },
+            createdAt: now
+          });
+          sequence += 1;
+          return plan;
+        }
       }
     };
   });
@@ -219,11 +311,22 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "GitHub repositories" })).toContainText("main");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("plan_created");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("human_action_required");
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("Show canonical events for an existing workstream.");
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("Inspect repository context.");
+  await page.getByRole("button", { name: "Approve plan" }).click();
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("approved");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("plan_approved");
+  await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("running");
   await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Plan approvals, blockers, and access requests");
 
   await page.getByRole("button", { name: /^Review dependency update awaiting_review$/ }).click();
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("Review and merge the dependency update after checks pass.");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("No events yet");
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("No coordinator plan yet");
+  await page.getByRole("button", { name: "Generate plan" }).click();
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("Review and merge the dependency update after checks pass.");
+  await page.getByRole("button", { name: "Reject plan" }).click();
+  await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("rejected");
 
   await page.getByRole("button", { name: "New Workstream" }).click();
   await page.getByLabel("Goal prompt").fill("Build a basic workstream UI with a list, detail page, and human attention placeholder.");

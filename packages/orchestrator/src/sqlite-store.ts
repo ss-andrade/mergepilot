@@ -11,7 +11,9 @@ import {
   CreateWorkstreamInput,
   GitHubRepositoryConnection,
   OrchestratorStore,
+  PlanDecisionInput,
   Plan,
+  ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   Workstream,
   WorkstreamEvent,
@@ -29,6 +31,7 @@ import {
   requireGitHubRepositoryName,
   requireId,
   requirePlanStatus,
+  requireStringList,
   requireString,
   requireWorkstreamStatus,
   assertWorkstreamStatusTransition
@@ -54,6 +57,10 @@ type EventRow = Omit<WorkstreamEvent, "workstreamId" | "createdAt" | "payload"> 
 
 type PlanRow = Omit<Plan, "workstreamId" | "createdAt" | "updatedAt"> & {
   workstream_id: string;
+  goal_restatement: string | null;
+  steps_json: string | null;
+  risks_json: string | null;
+  expected_outputs_json: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -307,11 +314,11 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     const workstreamId = requireId(input.workstreamId, "workstreamId");
     this.requireWorkstream(workstreamId);
     const now = new Date().toISOString();
+    const structured = normalizePlanInput(input);
     const plan: Plan = {
       id: randomUUID(),
       workstreamId,
-      title: requireString(input.title, "title", 160),
-      body: requireString(input.body, "body", 100000),
+      ...structured,
       status: input.status ? requirePlanStatus(input.status) : "draft",
       createdAt: now,
       updatedAt: now
@@ -319,11 +326,78 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
     this.db
       .prepare(
-        `INSERT INTO plans (id, workstream_id, title, body, status, created_at, updated_at)
-         VALUES (@id, @workstreamId, @title, @body, @status, @createdAt, @updatedAt)`
+        `INSERT INTO plans (
+           id, workstream_id, title, body, goal_restatement, steps_json, risks_json, expected_outputs_json, status, created_at, updated_at
+         )
+         VALUES (
+           @id, @workstreamId, @title, @body, @goalRestatement, @stepsJson, @risksJson, @expectedOutputsJson, @status, @createdAt, @updatedAt
+         )`
       )
-      .run(plan);
+      .run(toPlanRecord(plan));
     return plan;
+  }
+
+  proposePlan(input: ProposePlanInput): Plan {
+    const workstreamId = requireId(input.workstreamId, "workstreamId");
+    const workstream = this.getWorkstream(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+
+    if (workstream.status !== "draft" && workstream.status !== "planning") {
+      throw new Error(`Cannot propose a plan while workstream ${workstreamId} is ${workstream.status}.`);
+    }
+
+    const proposed = buildCoordinatorPlan(workstream);
+    const now = new Date().toISOString();
+    const plan: Plan = {
+      id: randomUUID(),
+      workstreamId,
+      ...proposed,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now
+    };
+
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE plans SET status = 'superseded', updated_at = ? WHERE workstream_id = ? AND status = 'draft'")
+        .run(now, workstreamId);
+      this.db
+        .prepare(
+          `INSERT INTO plans (
+             id, workstream_id, title, body, goal_restatement, steps_json, risks_json, expected_outputs_json, status, created_at, updated_at
+           )
+           VALUES (
+             @id, @workstreamId, @title, @body, @goalRestatement, @stepsJson, @risksJson, @expectedOutputsJson, @status, @createdAt, @updatedAt
+           )`
+        )
+        .run(toPlanRecord(plan));
+      this.setWorkstreamStatusUnchecked(workstreamId, "awaiting_plan_approval", now);
+      this.appendEventRecord({
+        workstreamId,
+        type: "plan_created",
+        message: "Coordinator plan proposed.",
+        payload: {
+          planId: plan.id,
+          status: plan.status,
+          steps: plan.steps.length,
+          risks: plan.risks.length,
+          expectedOutputs: plan.expectedOutputs.length
+        },
+        createdAt: now
+      });
+    })();
+
+    return plan;
+  }
+
+  approvePlan(input: PlanDecisionInput): Plan {
+    return this.decidePlan(input, "approved");
+  }
+
+  rejectPlan(input: PlanDecisionInput): Plan {
+    return this.decidePlan(input, "rejected");
   }
 
   listPlans(workstreamId: string): Plan[] {
@@ -335,7 +409,14 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
   createAgentRun(input: CreateAgentRunInput): AgentRun {
     const workstreamId = requireId(input.workstreamId, "workstreamId");
-    this.requireWorkstream(workstreamId);
+    const status = input.status ? requireAgentRunStatus(input.status) : "queued";
+    const workstream = this.getWorkstream(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+    if (workstream.status !== "running" || !this.hasApprovedPlan(workstreamId)) {
+      throw new Error("An approved plan is required before agent execution can start.");
+    }
     const now = new Date().toISOString();
     const run: AgentRun = {
       id: randomUUID(),
@@ -343,7 +424,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       providerId: requireString(input.providerId, "providerId", 80),
       adapterId: normalizeOptionalString(input.adapterId, 120),
       role: requireString(input.role, "role", 80),
-      status: input.status ? requireAgentRunStatus(input.status) : "queued",
+      status,
       goal: requireString(input.goal, "goal", 5000),
       startedAt: null,
       completedAt: null,
@@ -373,6 +454,118 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       .prepare("SELECT * FROM agent_runs WHERE workstream_id = ? ORDER BY created_at ASC")
       .all(id) as AgentRunRow[];
     return rows.map(mapAgentRunRow);
+  }
+
+  private decidePlan(input: PlanDecisionInput, status: "approved" | "rejected"): Plan {
+    const workstreamId = requireId(input.workstreamId, "workstreamId");
+    const planId = requireId(input.planId, "planId");
+    const reason = input.reason === undefined ? null : requireString(input.reason, "reason", 2000);
+    const workstream = this.getWorkstream(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+    if (workstream.status !== "awaiting_plan_approval") {
+      throw new Error(`Cannot decide a plan while workstream ${workstreamId} is ${workstream.status}.`);
+    }
+
+    const row = this.db.prepare("SELECT * FROM plans WHERE id = ? AND workstream_id = ?").get(planId, workstreamId) as
+      | PlanRow
+      | undefined;
+    if (!row) {
+      throw new Error(`Plan ${planId} was not found.`);
+    }
+    const current = mapPlanRow(row);
+    if (current.status !== "draft") {
+      throw new Error(`Plan ${planId} is already ${current.status}.`);
+    }
+
+    const updatedAt = new Date().toISOString();
+    const updated: Plan = {
+      ...current,
+      status,
+      updatedAt
+    };
+
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE plans SET status = ?, updated_at = ? WHERE id = ?").run(status, updatedAt, planId);
+      if (status === "approved") {
+        this.setWorkstreamStatusUnchecked(workstreamId, "running", updatedAt);
+        this.appendEventRecord({
+          workstreamId,
+          type: "plan_approved",
+          message: "Coordinator plan approved.",
+          payload: {
+            planId,
+            status,
+            unlocksExecution: true
+          },
+          createdAt: updatedAt
+        });
+      } else {
+        this.setWorkstreamStatusUnchecked(workstreamId, "planning", updatedAt);
+        this.appendEventRecord({
+          workstreamId,
+          type: "human_action_required",
+          message: "Coordinator plan rejected.",
+          payload: {
+            planId,
+            status,
+            reason
+          },
+          createdAt: updatedAt
+        });
+      }
+    })();
+
+    return updated;
+  }
+
+  private setWorkstreamStatusUnchecked(workstreamId: string, status: Workstream["status"], updatedAt: string): void {
+    requireWorkstreamStatus(status);
+    this.db.prepare("UPDATE workstreams SET status = ?, updated_at = ? WHERE id = ?").run(status, updatedAt, workstreamId);
+  }
+
+  private hasApprovedPlan(workstreamId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM plans WHERE workstream_id = ? AND status = 'approved' LIMIT 1")
+      .get(workstreamId);
+    return row !== undefined;
+  }
+
+  private appendEventRecord(input: AppendWorkstreamEventInput & { createdAt: string }): WorkstreamEvent {
+    const type = requireEventType(input.type);
+    const message = requireString(input.message, "message", 2000);
+    assertJsonCompatible(input.payload);
+    const nextSequence =
+      ((this.db
+        .prepare("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM workstream_events WHERE workstream_id = ?")
+        .get(input.workstreamId) as { sequence: number }).sequence ?? 1);
+    const record = {
+      id: randomUUID(),
+      workstreamId: input.workstreamId,
+      sequence: nextSequence,
+      type,
+      message,
+      payloadJson: input.payload === undefined ? null : JSON.stringify(input.payload),
+      createdAt: input.createdAt
+    };
+    this.db
+      .prepare(
+        `INSERT INTO workstream_events (id, workstream_id, sequence, type, message, payload_json, created_at)
+         VALUES (@id, @workstreamId, @sequence, @type, @message, @payloadJson, @createdAt)`
+      )
+      .run(record);
+    this.db.prepare("UPDATE workstreams SET updated_at = ? WHERE id = ?").run(input.createdAt, input.workstreamId);
+
+    return {
+      id: record.id,
+      workstreamId: input.workstreamId,
+      sequence: nextSequence,
+      type,
+      message,
+      payload: input.payload === undefined ? null : input.payload,
+      createdAt: input.createdAt
+    };
   }
 
   close(): void {
@@ -429,6 +622,10 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
         title TEXT NOT NULL,
         body TEXT NOT NULL,
+        goal_restatement TEXT,
+        steps_json TEXT,
+        risks_json TEXT,
+        expected_outputs_json TEXT,
         status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'rejected', 'superseded')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -472,6 +669,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     `);
     this.ensureWorkstreamsGitHubRepositorySchema();
     this.ensureWorkstreamEventsSchema();
+    this.ensurePlansSchema();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
         ON workstream_events(workstream_id, sequence);
@@ -546,6 +744,10 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
           workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
           title TEXT NOT NULL,
           body TEXT NOT NULL,
+          goal_restatement TEXT,
+          steps_json TEXT,
+          risks_json TEXT,
+          expected_outputs_json TEXT,
           status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'rejected', 'superseded')),
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -596,11 +798,15 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       }
 
       const insertPlan = this.db.prepare(`
-        INSERT INTO plans (id, workstream_id, title, body, status, created_at, updated_at)
-        VALUES (@id, @workstream_id, @title, @body, @status, @created_at, @updated_at)
+        INSERT INTO plans (
+          id, workstream_id, title, body, goal_restatement, steps_json, risks_json, expected_outputs_json, status, created_at, updated_at
+        )
+        VALUES (
+          @id, @workstream_id, @title, @body, @goal_restatement, @steps_json, @risks_json, @expected_outputs_json, @status, @created_at, @updated_at
+        )
       `);
       for (const row of legacyPlans) {
-        insertPlan.run(row);
+        insertPlan.run(withLegacyPlanFields(row));
       }
 
       const insertAgentRun = this.db.prepare(`
@@ -680,6 +886,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     const columns = this.db.prepare("PRAGMA table_info(workstreams)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "github_repository_json")) {
       this.db.exec("ALTER TABLE workstreams ADD COLUMN github_repository_json TEXT;");
+    }
+  }
+
+  private ensurePlansSchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(plans)").all() as Array<{ name: string }>;
+    const columnNames = new Set(columns.map((column) => column.name));
+    const statements = [
+      ["goal_restatement", "ALTER TABLE plans ADD COLUMN goal_restatement TEXT;"],
+      ["steps_json", "ALTER TABLE plans ADD COLUMN steps_json TEXT;"],
+      ["risks_json", "ALTER TABLE plans ADD COLUMN risks_json TEXT;"],
+      ["expected_outputs_json", "ALTER TABLE plans ADD COLUMN expected_outputs_json TEXT;"]
+    ] as const;
+    for (const [column, statement] of statements) {
+      if (!columnNames.has(column)) {
+        this.db.exec(statement);
+      }
     }
   }
 
@@ -765,14 +987,130 @@ function mapEventRow(row: EventRow): WorkstreamEvent {
 }
 
 function mapPlanRow(row: PlanRow): Plan {
-  return {
-    id: row.id,
+  const legacy = normalizePlanInput({
     workstreamId: row.workstream_id,
     title: row.title,
     body: row.body,
+    goalRestatement: row.goal_restatement ?? undefined,
+    steps: parseStringArray(row.steps_json, "steps"),
+    risks: parseStringArray(row.risks_json, "risks"),
+    expectedOutputs: parseStringArray(row.expected_outputs_json, "expectedOutputs")
+  });
+  return {
+    id: row.id,
+    workstreamId: row.workstream_id,
+    title: legacy.title,
+    body: legacy.body,
+    goalRestatement: legacy.goalRestatement,
+    steps: legacy.steps,
+    risks: legacy.risks,
+    expectedOutputs: legacy.expectedOutputs,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function normalizePlanInput(input: CreatePlanInput): Omit<Plan, "id" | "workstreamId" | "status" | "createdAt" | "updatedAt"> {
+  const goalRestatement = input.goalRestatement === undefined && input.title !== undefined
+    ? requireString(input.title, "title", 160)
+    : requireString(input.goalRestatement as string, "goalRestatement", 5000);
+  const steps = input.steps === undefined && input.body !== undefined
+    ? [requireString(input.body, "body", 100000)]
+    : requireStringList(input.steps, "steps", 20, 2000);
+  const risks = input.risks === undefined ? ["No risks captured for this legacy plan."] : requireStringList(input.risks, "risks", 20, 2000);
+  const expectedOutputs = input.expectedOutputs === undefined
+    ? ["Plan record persisted."]
+    : requireStringList(input.expectedOutputs, "expectedOutputs", 20, 2000);
+  const title = input.title === undefined ? "Coordinator plan" : requireString(input.title, "title", 160);
+  const body = input.body === undefined ? renderPlanBody(goalRestatement, steps, risks, expectedOutputs) : requireString(input.body, "body", 100000);
+
+  return {
+    title,
+    body,
+    goalRestatement,
+    steps,
+    risks,
+    expectedOutputs
+  };
+}
+
+function buildCoordinatorPlan(
+  workstream: Workstream
+): Omit<Plan, "id" | "workstreamId" | "status" | "createdAt" | "updatedAt"> {
+  const goalRestatement = requireString(workstream.goal, "goal", 5000);
+  const repoLabel = workstream.githubRepository
+    ? `${workstream.githubRepository.owner}/${workstream.githubRepository.name} on ${workstream.githubRepository.defaultBranch}`
+    : workstream.repo;
+  const steps = [
+    `Inspect ${repoLabel} context and existing implementation patterns related to the goal.`,
+    `Implement the smallest local change set that satisfies: ${goalRestatement}`,
+    "Verify targeted tests, type checks, and visible runtime behavior before reporting results."
+  ];
+  const risks = [
+    "Existing local changes or legacy data may constrain the implementation path.",
+    "The deterministic MVP plan may need human edits if repository context reveals a narrower scope."
+  ];
+  const expectedOutputs = [
+    "Structured coordinator plan linked to the workstream.",
+    "Timeline evidence for plan creation and the approval decision.",
+    "Workstream execution unlocked only after plan approval."
+  ];
+  return {
+    title: "Coordinator plan",
+    body: renderPlanBody(goalRestatement, steps, risks, expectedOutputs),
+    goalRestatement,
+    steps,
+    risks,
+    expectedOutputs
+  };
+}
+
+function renderPlanBody(goalRestatement: string, steps: string[], risks: string[], expectedOutputs: string[]): string {
+  return [
+    `Goal: ${goalRestatement}`,
+    "",
+    "Steps:",
+    ...steps.map((step, index) => `${index + 1}. ${step}`),
+    "",
+    "Risks:",
+    ...risks.map((risk) => `- ${risk}`),
+    "",
+    "Expected outputs:",
+    ...expectedOutputs.map((output) => `- ${output}`)
+  ].join("\n");
+}
+
+function toPlanRecord(plan: Plan): Record<string, unknown> {
+  return {
+    ...plan,
+    stepsJson: JSON.stringify(plan.steps),
+    risksJson: JSON.stringify(plan.risks),
+    expectedOutputsJson: JSON.stringify(plan.expectedOutputs)
+  };
+}
+
+function parseStringArray(value: string | null, field: string): string[] | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  const parsed = JSON.parse(value) as unknown;
+  return requireStringList(parsed, field, 20, 2000);
+}
+
+function withLegacyPlanFields(row: Record<string, unknown>): Record<string, unknown> {
+  const normalized = normalizePlanInput({
+    workstreamId: String(row.workstream_id ?? ""),
+    title: String(row.title ?? "Legacy plan"),
+    body: String(row.body ?? "Legacy plan body"),
+    status: row.status as Plan["status"] | undefined
+  });
+  return {
+    ...row,
+    goal_restatement: normalized.goalRestatement,
+    steps_json: JSON.stringify(normalized.steps),
+    risks_json: JSON.stringify(normalized.risks),
+    expected_outputs_json: JSON.stringify(normalized.expectedOutputs)
   };
 }
 

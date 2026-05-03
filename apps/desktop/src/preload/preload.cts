@@ -117,6 +117,30 @@ export interface AppendWorkstreamEventInput {
   payload?: unknown;
 }
 
+interface Plan {
+  id: string;
+  workstreamId: string;
+  title: string;
+  body: string;
+  goalRestatement: string;
+  steps: string[];
+  risks: string[];
+  expectedOutputs: string[];
+  status: "draft" | "approved" | "rejected" | "superseded";
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ProposePlanInput {
+  workstreamId: string;
+}
+
+interface PlanDecisionInput {
+  workstreamId: string;
+  planId: string;
+  reason?: string;
+}
+
 export interface MergePilotDesktopApi {
   readonly appInfo: {
     readonly name: "MergePilot";
@@ -145,6 +169,12 @@ export interface MergePilotDesktopApi {
   events: {
     append(input: AppendWorkstreamEventInput): Promise<WorkstreamEvent>;
     list(workstreamId: string): Promise<WorkstreamEvent[]>;
+  };
+  plans: {
+    propose(input: ProposePlanInput): Promise<Plan>;
+    list(workstreamId: string): Promise<Plan[]>;
+    approve(input: PlanDecisionInput): Promise<Plan>;
+    reject(input: PlanDecisionInput): Promise<Plan>;
   };
 }
 
@@ -176,6 +206,12 @@ const desktopApi: MergePilotDesktopApi = {
   events: {
     append: (input) => ipcRenderer.invoke("events:append", input),
     list: (workstreamId) => ipcRenderer.invoke("events:list", { workstreamId })
+  },
+  plans: {
+    propose: (input) => ipcRenderer.invoke("plans:propose", input),
+    list: (workstreamId) => ipcRenderer.invoke("plans:list", { workstreamId }),
+    approve: (input) => ipcRenderer.invoke("plans:approve", input),
+    reject: (input) => ipcRenderer.invoke("plans:reject", input)
   }
 };
 

@@ -115,6 +115,30 @@ interface AppendWorkstreamEventInput {
   payload?: unknown;
 }
 
+interface Plan {
+  id: string;
+  workstreamId: string;
+  title: string;
+  body: string;
+  goalRestatement: string;
+  steps: string[];
+  risks: string[];
+  expectedOutputs: string[];
+  status: "draft" | "approved" | "rejected" | "superseded";
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ProposePlanInput {
+  workstreamId: string;
+}
+
+interface PlanDecisionInput {
+  workstreamId: string;
+  planId: string;
+  reason?: string;
+}
+
 interface MergePilotDesktopApi {
   readonly appInfo: {
     readonly name: "MergePilot";
@@ -143,6 +167,12 @@ interface MergePilotDesktopApi {
   events: {
     append(input: AppendWorkstreamEventInput): Promise<WorkstreamEvent>;
     list(workstreamId: string): Promise<WorkstreamEvent[]>;
+  };
+  plans: {
+    propose(input: ProposePlanInput): Promise<Plan>;
+    list(workstreamId: string): Promise<Plan[]>;
+    approve(input: PlanDecisionInput): Promise<Plan>;
+    reject(input: PlanDecisionInput): Promise<Plan>;
   };
 }
 

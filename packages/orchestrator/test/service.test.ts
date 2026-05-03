@@ -86,6 +86,44 @@ describe("LocalOrchestratorService", () => {
     await orchestrator.stop();
   });
 
+  it("serves the coordinator planning approval loop", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({ dataDir });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Service planning",
+      goal: "Create a visible plan before execution.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+
+    expect(plan).toMatchObject({
+      workstreamId: workstream.id,
+      goalRestatement: "Create a visible plan before execution.",
+      status: "draft"
+    });
+    expect(orchestrator.listPlans(workstream.id)).toEqual([expect.objectContaining({ id: plan.id })]);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_plan_approval" });
+    expect(orchestrator.listEvents(workstream.id)).toEqual([
+      expect.objectContaining({ type: "plan_created", payload: expect.objectContaining({ planId: plan.id }) })
+    ]);
+
+    expect(orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id })).toMatchObject({
+      id: plan.id,
+      status: "approved"
+    });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "running" });
+    expect(orchestrator.listEvents(workstream.id).at(-1)).toMatchObject({
+      type: "plan_approved",
+      payload: expect.objectContaining({ planId: plan.id, unlocksExecution: true })
+    });
+
+    await orchestrator.stop();
+  });
+
   it("rejects data operations while stopped", async () => {
     const orchestrator = createLocalOrchestrator({ dataDir: await createTempDir() });
 

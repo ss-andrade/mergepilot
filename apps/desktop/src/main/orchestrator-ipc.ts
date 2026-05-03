@@ -3,6 +3,8 @@ import type {
   ConnectGitHubRepositoryInput,
   CreateWorkstreamInput,
   LocalOrchestratorService,
+  PlanDecisionInput,
+  ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   WorkstreamGitHubRepositoryScope,
   WorkstreamEventType,
@@ -35,6 +37,10 @@ export function registerOrchestratorIpcHandlers(
     | "listGitHubRepositories"
     | "selectGitHubRepository"
     | "recordGitHubRepositoryConnectionError"
+    | "proposePlan"
+    | "listPlans"
+    | "approvePlan"
+    | "rejectPlan"
     | "appendEvent"
     | "listEvents"
   >
@@ -80,6 +86,22 @@ export function registerOrchestratorIpcHandlers(
 
   ipc.handle("github:repositories:report-error", (_event, rawInput) => {
     return orchestrator.recordGitHubRepositoryConnectionError(parseReportGitHubRepositoryConnectionErrorInput(rawInput));
+  });
+
+  ipc.handle("plans:propose", (_event, rawInput) => {
+    return orchestrator.proposePlan(parseProposePlanInput(rawInput));
+  });
+
+  ipc.handle("plans:list", (_event, rawInput) => {
+    return orchestrator.listPlans(parseIdInput(rawInput, "workstreamId"));
+  });
+
+  ipc.handle("plans:approve", (_event, rawInput) => {
+    return orchestrator.approvePlan(parsePlanDecisionInput(rawInput));
+  });
+
+  ipc.handle("plans:reject", (_event, rawInput) => {
+    return orchestrator.rejectPlan(parsePlanDecisionInput(rawInput));
   });
 
   ipc.handle("events:append", (_event, rawInput) => {
@@ -156,6 +178,25 @@ function parseReportGitHubRepositoryConnectionErrorInput(
     message: requireBoundedString(input.message, "message", 2000),
     reason: requireBoundedString(input.reason, "reason", 160)
   };
+}
+
+function parseProposePlanInput(rawInput: unknown): ProposePlanInput {
+  const input = requireRecord(rawInput);
+  return {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId")
+  };
+}
+
+function parsePlanDecisionInput(rawInput: unknown): PlanDecisionInput {
+  const input = requireRecord(rawInput);
+  const parsed: PlanDecisionInput = {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId"),
+    planId: parseIdInput(input.planId, "planId")
+  };
+  if ("reason" in input && input.reason !== undefined && input.reason !== null) {
+    parsed.reason = requireBoundedString(input.reason, "reason", 2000);
+  }
+  return parsed;
 }
 
 function parseAppendEventInput(rawInput: unknown): AppendWorkstreamEventInput {
