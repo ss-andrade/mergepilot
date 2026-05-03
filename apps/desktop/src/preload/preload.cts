@@ -176,6 +176,14 @@ interface PullRequest {
   body: string;
   status: "open" | "failed";
   errorMessage: string | null;
+  checksStatus: "unknown" | "pending" | "passed" | "failed";
+  reviewStatus: "not_started" | "ready" | "changes_requested" | "blocked";
+  changedFiles: string[];
+  testCommands: string[];
+  ciSummary: string | null;
+  riskSummary: string | null;
+  reviewSummary: string | null;
+  humanAction: "review" | "merge" | "answer_question" | "fix_access" | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -185,6 +193,11 @@ interface OpenPullRequestInput {
   agentRunId: string;
   title?: string;
   body?: string;
+}
+
+interface SyncPullRequestReviewInput {
+  workstreamId: string;
+  pullRequestId: string;
 }
 
 export interface MergePilotDesktopApi {
@@ -229,6 +242,7 @@ export interface MergePilotDesktopApi {
   pullRequests: {
     open(input: OpenPullRequestInput): Promise<PullRequest>;
     list(workstreamId: string): Promise<PullRequest[]>;
+    syncReview(input: SyncPullRequestReviewInput): Promise<PullRequest>;
   };
 }
 
@@ -273,7 +287,8 @@ const desktopApi: MergePilotDesktopApi = {
   },
   pullRequests: {
     open: (input) => ipcRenderer.invoke("pull-requests:open", input),
-    list: (workstreamId) => ipcRenderer.invoke("pull-requests:list", { workstreamId })
+    list: (workstreamId) => ipcRenderer.invoke("pull-requests:list", { workstreamId }),
+    syncReview: (input) => ipcRenderer.invoke("pull-requests:sync-review", input)
   }
 };
 

@@ -374,11 +374,19 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
             body: "Mock pull request body.",
             status: "open",
             errorMessage: null,
+            checksStatus: "unknown",
+            reviewStatus: "not_started",
+            changedFiles: [],
+            testCommands: [],
+            ciSummary: null,
+            riskSummary: null,
+            reviewSummary: null,
+            humanAction: null,
             createdAt: now,
             updatedAt: now
           };
           pullRequests.push(created);
-          workstream.status = "merge_ready";
+          workstream.status = "awaiting_review";
           events.push({
             id: `event-${sequence + 1}`,
             workstreamId,
@@ -391,7 +399,29 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           sequence += 1;
           return created;
         },
-        list: async (workstreamId) => pullRequests.filter((pullRequest) => pullRequest.workstreamId === workstreamId)
+        list: async (workstreamId) => pullRequests.filter((pullRequest) => pullRequest.workstreamId === workstreamId),
+        syncReview: async ({ workstreamId, pullRequestId }) => {
+          const pullRequest = pullRequests.find((item) => item.id === pullRequestId && item.workstreamId === workstreamId);
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          if (!pullRequest || !workstream) {
+            throw new Error("Missing pull request.");
+          }
+          pullRequest.checksStatus = "passed";
+          pullRequest.reviewStatus = "ready";
+          pullRequest.changedFiles = ["apps/web/src/App.tsx"];
+          pullRequest.testCommands = ["npm run test:e2e:web"];
+          pullRequest.ciSummary = "CI passed";
+          pullRequest.riskSummary = "Low risk";
+          pullRequest.reviewSummary = "CI passed and review summary is ready for merge.";
+          pullRequest.humanAction = "merge";
+          pullRequest.updatedAt = now;
+          workstream.status = "merge_ready";
+          events.push({ id: `event-${sequence + 1}`, workstreamId, sequence: sequence + 1, type: "ci_passed", message: "Pull request checks passed.", payload: { pullRequestId, checksStatus: "passed" }, createdAt: now });
+          sequence += 1;
+          events.push({ id: `event-${sequence + 1}`, workstreamId, sequence: sequence + 1, type: "review_summary_created", message: "Pull request review summary created.", payload: { pullRequestId, humanAction: "merge" }, createdAt: now });
+          sequence += 1;
+          return pullRequest;
+        }
       }
     };
   });
@@ -431,8 +461,14 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("View PR");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("pr_opened");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("https://github.com/ss-andrade/mergepilot/pull/42");
+  await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("awaiting_review");
+  await page.getByRole("button", { name: "Sync review" }).click();
+  await expect(page.getByRole("region", { name: "Pull request review summary" })).toContainText("CI passed and review summary is ready for merge.");
+  await expect(page.getByRole("region", { name: "Pull request review summary" })).toContainText("apps/web/src/App.tsx");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("ci_passed");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("review_summary_created");
+  await expect(page.getByRole("region", { name: "Human attention" })).toContainText("ready to merge");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("merge_ready");
-  await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Plan approvals, blockers, and access requests");
 
   await page.getByRole("button", { name: /^Review dependency update awaiting_review$/ }).click();
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("Review and merge the dependency update after checks pass.");

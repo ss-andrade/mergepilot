@@ -15,6 +15,7 @@ import {
   Plan,
   PullRequest,
   CreatePullRequestInput,
+  RecordPullRequestReviewInput,
   ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   UpdateAgentRunInput,
@@ -95,7 +96,23 @@ type AgentRunRow = Omit<
 
 type PullRequestRow = Omit<
   PullRequest,
-  "workstreamId" | "agentRunId" | "branchName" | "commitSha" | "prNumber" | "prUrl" | "errorMessage" | "createdAt" | "updatedAt"
+  | "workstreamId"
+  | "agentRunId"
+  | "branchName"
+  | "commitSha"
+  | "prNumber"
+  | "prUrl"
+  | "errorMessage"
+  | "checksStatus"
+  | "reviewStatus"
+  | "changedFiles"
+  | "testCommands"
+  | "ciSummary"
+  | "riskSummary"
+  | "reviewSummary"
+  | "humanAction"
+  | "createdAt"
+  | "updatedAt"
 > & {
   workstream_id: string;
   agent_run_id: string;
@@ -104,6 +121,14 @@ type PullRequestRow = Omit<
   pr_number: number | null;
   pr_url: string | null;
   error_message: string | null;
+  checks_status: PullRequest["checksStatus"];
+  review_status: PullRequest["reviewStatus"];
+  changed_files_json: string | null;
+  test_commands_json: string | null;
+  ci_summary: string | null;
+  risk_summary: string | null;
+  review_summary: string | null;
+  human_action: PullRequest["humanAction"];
   created_at: string;
   updated_at: string;
 };
@@ -564,6 +589,14 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       body: requireString(input.body, "body", 10000),
       status,
       errorMessage: normalizeOptionalString(input.errorMessage, 2000),
+      checksStatus: "unknown",
+      reviewStatus: "not_started",
+      changedFiles: [],
+      testCommands: [],
+      ciSummary: null,
+      riskSummary: null,
+      reviewSummary: null,
+      humanAction: null,
       createdAt: now,
       updatedAt: now
     };
@@ -572,12 +605,91 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     }
     this.db
       .prepare(`INSERT INTO pull_requests (
-        id, workstream_id, agent_run_id, branch_name, commit_sha, pr_number, pr_url, title, body, status, error_message, created_at, updated_at
+        id, workstream_id, agent_run_id, branch_name, commit_sha, pr_number, pr_url, title, body, status, error_message,
+        checks_status, review_status, changed_files_json, test_commands_json, ci_summary, risk_summary, review_summary, human_action, created_at, updated_at
       ) VALUES (
-        @id, @workstreamId, @agentRunId, @branchName, @commitSha, @prNumber, @prUrl, @title, @body, @status, @errorMessage, @createdAt, @updatedAt
+        @id, @workstreamId, @agentRunId, @branchName, @commitSha, @prNumber, @prUrl, @title, @body, @status, @errorMessage,
+        @checksStatus, @reviewStatus, @changedFilesJson, @testCommandsJson, @ciSummary, @riskSummary, @reviewSummary, @humanAction, @createdAt, @updatedAt
       )`)
-      .run(pullRequest);
+      .run(toPullRequestRecord(pullRequest));
     return pullRequest;
+  }
+
+  recordPullRequestReview(input: RecordPullRequestReviewInput): PullRequest {
+    const workstreamId = requireId(input.workstreamId, "workstreamId");
+    const pullRequestId = requireId(input.pullRequestId, "pullRequestId");
+    const changedFiles = requireStringList(input.changedFiles, "changedFiles", 100, 2048) ?? [];
+    const testCommands = requireStringList(input.testCommands, "testCommands", 50, 2000) ?? [];
+    const checksStatus = requirePullRequestChecksStatus(input.checksStatus);
+    const reviewStatus = requirePullRequestReviewStatus(input.reviewStatus);
+    const humanAction = requirePullRequestHumanAction(input.humanAction);
+    if (humanAction === "merge" && (checksStatus !== "passed" || reviewStatus !== "ready")) {
+      throw new Error("Merge action requires passed checks and a ready review summary.");
+    }
+    if ((checksStatus !== "passed" || reviewStatus !== "ready") && humanAction === "merge") {
+      throw new Error("Pull request cannot be merge-ready until checks pass and review is ready.");
+    }
+    const ciSummary = normalizeOptionalString(input.ciSummary, 4000);
+    const riskSummary = normalizeOptionalString(input.riskSummary, 4000);
+    const reviewSummary = normalizeOptionalString(input.reviewSummary, 10000);
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM pull_requests WHERE id = ? AND workstream_id = ?").get(pullRequestId, workstreamId) as PullRequestRow | undefined;
+      if (!row) {
+        throw new Error(`Pull request ${pullRequestId} was not found for workstream ${workstreamId}.`);
+      }
+      if (row.status !== "open") {
+        throw new Error("Pull request review can only be recorded for an open pull request.");
+      }
+      this.db.prepare(`UPDATE pull_requests
+        SET checks_status = @checksStatus, review_status = @reviewStatus, changed_files_json = @changedFilesJson,
+            test_commands_json = @testCommandsJson, ci_summary = @ciSummary, risk_summary = @riskSummary,
+            review_summary = @reviewSummary, human_action = @humanAction, updated_at = @updatedAt
+        WHERE id = @pullRequestId AND workstream_id = @workstreamId`).run({
+          pullRequestId, workstreamId, checksStatus, reviewStatus, changedFilesJson: JSON.stringify(changedFiles),
+          testCommandsJson: JSON.stringify(testCommands), ciSummary, riskSummary, reviewSummary, humanAction, updatedAt: now
+        });
+      const eventType = checksStatus === "passed" ? "ci_passed" : checksStatus === "failed" ? "ci_failed" : "ci_started";
+      this.appendEventRecord({
+        workstreamId,
+        type: eventType,
+        message: checksStatus === "passed" ? "Pull request checks passed." : checksStatus === "failed" ? "Pull request checks failed." : "Pull request checks are pending.",
+        payload: { pullRequestId, checksStatus, ciSummary },
+        createdAt: now
+      });
+      this.appendEventRecord({
+        workstreamId,
+        type: "review_summary_created",
+        message: "Pull request review summary created.",
+        payload: { pullRequestId, reviewStatus, humanAction, changedFiles, testCommands, ciSummary, riskSummary, reviewSummary },
+        createdAt: now
+      });
+      this.appendEventRecord({
+        workstreamId,
+        type: "human_action_required",
+        message: humanActionMessage(humanAction),
+        payload: { pullRequestId, humanAction, checksStatus, reviewStatus },
+        createdAt: now
+      });
+      const nextWorkstreamStatus = checksStatus === "passed" && reviewStatus === "ready" && humanAction === "merge"
+        ? "merge_ready"
+        : humanAction === "fix_access" || humanAction === "answer_question" || reviewStatus === "blocked" || reviewStatus === "changes_requested"
+          ? "awaiting_user_input"
+          : checksStatus === "pending" || checksStatus === "unknown"
+            ? "awaiting_review"
+            : "awaiting_user_input";
+      const currentWorkstream = this.getWorkstream(workstreamId);
+      if (!currentWorkstream) {
+        throw new Error(`Workstream ${workstreamId} was not found.`);
+      }
+      const prReviewRecovery = currentWorkstream.status === "awaiting_user_input" && (nextWorkstreamStatus === "awaiting_review" || nextWorkstreamStatus === "merge_ready");
+      if (!prReviewRecovery) {
+        assertWorkstreamStatusTransition(currentWorkstream.status, nextWorkstreamStatus);
+      }
+      this.setWorkstreamStatusUnchecked(workstreamId, nextWorkstreamStatus, now);
+      const updated = this.db.prepare("SELECT * FROM pull_requests WHERE id = ?").get(pullRequestId) as PullRequestRow;
+      return mapPullRequestRow(updated);
+    })();
   }
 
 
@@ -618,7 +730,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         },
         createdAt: now
       });
-      this.setWorkstreamStatusUnchecked(pullRequest.workstreamId, "merge_ready", now);
+      this.setWorkstreamStatusUnchecked(pullRequest.workstreamId, "awaiting_review", now);
       return pullRequest;
     })();
   }
@@ -860,6 +972,14 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         body TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('open', 'failed')),
         error_message TEXT,
+        checks_status TEXT NOT NULL DEFAULT 'unknown' CHECK (checks_status IN ('unknown', 'pending', 'passed', 'failed')),
+        review_status TEXT NOT NULL DEFAULT 'not_started' CHECK (review_status IN ('not_started', 'ready', 'changes_requested', 'blocked')),
+        changed_files_json TEXT,
+        test_commands_json TEXT,
+        ci_summary TEXT,
+        risk_summary TEXT,
+        review_summary TEXT,
+        human_action TEXT CHECK (human_action IN ('review', 'merge', 'answer_question', 'fix_access')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1185,6 +1305,14 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         body TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('open', 'failed')),
         error_message TEXT,
+        checks_status TEXT NOT NULL DEFAULT 'unknown' CHECK (checks_status IN ('unknown', 'pending', 'passed', 'failed')),
+        review_status TEXT NOT NULL DEFAULT 'not_started' CHECK (review_status IN ('not_started', 'ready', 'changes_requested', 'blocked')),
+        changed_files_json TEXT,
+        test_commands_json TEXT,
+        ci_summary TEXT,
+        risk_summary TEXT,
+        review_summary TEXT,
+        human_action TEXT CHECK (human_action IN ('review', 'merge', 'answer_question', 'fix_access')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1193,6 +1321,27 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pull_requests_open_agent_run
         ON pull_requests(agent_run_id) WHERE status = 'open';
     `);
+    this.ensureColumns("pull_requests", [
+      ["checks_status", "TEXT NOT NULL DEFAULT 'unknown'"],
+      ["review_status", "TEXT NOT NULL DEFAULT 'not_started'"],
+      ["changed_files_json", "TEXT"],
+      ["test_commands_json", "TEXT"],
+      ["ci_summary", "TEXT"],
+      ["risk_summary", "TEXT"],
+      ["review_summary", "TEXT"],
+      ["human_action", "TEXT"]
+    ]);
+  }
+
+  private ensureColumns(table: string, columns: Array<[string, string]>): void {
+    const existing = new Set(
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name)
+    );
+    for (const [name, definition] of columns) {
+      if (!existing.has(name)) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+      }
+    }
   }
 
   private createEventImmutabilityTriggers(): void {
@@ -1244,6 +1393,14 @@ function mapPullRequestRow(row: PullRequestRow): PullRequest {
     body: row.body,
     status: row.status,
     errorMessage: row.error_message,
+    checksStatus: row.checks_status ?? "unknown",
+    reviewStatus: row.review_status ?? "not_started",
+    changedFiles: parseOptionalStringArray(row.changed_files_json, "changedFiles"),
+    testCommands: parseOptionalStringArray(row.test_commands_json, "testCommands"),
+    ciSummary: row.ci_summary,
+    riskSummary: row.risk_summary,
+    reviewSummary: row.review_summary,
+    humanAction: row.human_action,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -1406,6 +1563,17 @@ function parseStringArray(value: string | null, field: string): string[] | undef
   return requireStringList(parsed, field, 20, 2000);
 }
 
+function parseOptionalStringArray(value: string | null, field: string): string[] {
+  if (value === null) {
+    return [];
+  }
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${field} must be an array.`);
+  }
+  return parsed.map((item) => requireString(item, field, 2048));
+}
+
 function withLegacyPlanFields(row: Record<string, unknown>): Record<string, unknown> {
   const normalized = normalizePlanInput({
     workstreamId: String(row.workstream_id ?? ""),
@@ -1440,6 +1608,49 @@ function mapAgentRunRow(row: AgentRunRow): AgentRun {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+
+function toPullRequestRecord(pullRequest: PullRequest): Record<string, unknown> {
+  return {
+    ...pullRequest,
+    changedFilesJson: JSON.stringify(pullRequest.changedFiles),
+    testCommandsJson: JSON.stringify(pullRequest.testCommands)
+  };
+}
+
+function requirePullRequestChecksStatus(value: string): PullRequest["checksStatus"] {
+  if (["unknown", "pending", "passed", "failed"].includes(value)) {
+    return value as PullRequest["checksStatus"];
+  }
+  throw new Error(`Invalid pull request checks status: ${value}.`);
+}
+
+function requirePullRequestReviewStatus(value: string): PullRequest["reviewStatus"] {
+  if (["not_started", "ready", "changes_requested", "blocked"].includes(value)) {
+    return value as PullRequest["reviewStatus"];
+  }
+  throw new Error(`Invalid pull request review status: ${value}.`);
+}
+
+function requirePullRequestHumanAction(value: string): NonNullable<PullRequest["humanAction"]> {
+  if (["review", "merge", "answer_question", "fix_access"].includes(value)) {
+    return value as NonNullable<PullRequest["humanAction"]>;
+  }
+  throw new Error(`Invalid pull request human action: ${value}.`);
+}
+
+function humanActionMessage(action: NonNullable<PullRequest["humanAction"]>): string {
+  switch (action) {
+    case "merge":
+      return "Review complete; ready for merge.";
+    case "review":
+      return "Pull request is ready for human review.";
+    case "answer_question":
+      return "Human input is required before review can continue.";
+    case "fix_access":
+      return "Repository access must be fixed before review can continue.";
+  }
 }
 
 function nullableString(value: unknown): string | null {

@@ -172,10 +172,25 @@ describe("orchestrator IPC handlers", () => {
         body: "Open a pull request.",
         status: "open" as const,
         errorMessage: null,
+        checksStatus: "passed" as const,
+        reviewStatus: "ready" as const,
+        changedFiles: ["src/app.ts"],
+        testCommands: ["npm test"],
+        ciSummary: "CI passed",
+        riskSummary: "Low risk",
+        reviewSummary: "Ready to merge.",
+        humanAction: "merge" as const,
         createdAt: "2026-05-01T00:11:00.000Z",
         updatedAt: "2026-05-01T00:11:00.000Z"
       })),
-      listPullRequests: vi.fn(() => [])
+      listPullRequests: vi.fn(() => []),
+      syncPullRequestReview: vi.fn(() => ({
+        id: "pr-1", workstreamId: "ws-1", agentRunId: "run-1", branchName: "mergepilot/ws-1/build/run-1", commitSha: "abc123def456",
+        prNumber: 42, prUrl: "https://github.com/ss-andrade/mergepilot/pull/42", title: "IPC PR", body: "Open a pull request.", status: "open" as const, errorMessage: null,
+        checksStatus: "passed" as const, reviewStatus: "ready" as const, changedFiles: ["src/app.ts"], testCommands: ["npm test"],
+        ciSummary: "CI passed", riskSummary: "Low risk", reviewSummary: "Ready to merge.", humanAction: "merge" as const,
+        createdAt: "2026-05-01T00:11:00.000Z", updatedAt: "2026-05-01T00:12:00.000Z"
+      }))
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -244,6 +259,12 @@ describe("orchestrator IPC handlers", () => {
       status: "open"
     });
     await expect(ipc.invoke("pull-requests:list", { workstreamId: "ws-1" })).resolves.toEqual([]);
+    await expect(ipc.invoke("pull-requests:sync-review", { workstreamId: "ws-1", pullRequestId: "pr-1" })).resolves.toMatchObject({
+      id: "pr-1",
+      checksStatus: "passed",
+      reviewStatus: "ready",
+      humanAction: "merge"
+    });
 
     expect(orchestrator.createWorkstream).toHaveBeenCalledWith({
       title: "IPC work",
@@ -283,6 +304,7 @@ describe("orchestrator IPC handlers", () => {
     expect(orchestrator.startBuildAgentRun).toHaveBeenCalledWith({ workstreamId: "ws-1" });
     expect(orchestrator.openPullRequest).toHaveBeenCalledWith({ workstreamId: "ws-1", agentRunId: "run-1" });
     expect(orchestrator.listPullRequests).toHaveBeenCalledWith("ws-1");
+    expect(orchestrator.syncPullRequestReview).toHaveBeenCalledWith({ workstreamId: "ws-1", pullRequestId: "pr-1" });
   });
 
   it("validates IPC input before calling services", async () => {
@@ -309,7 +331,8 @@ describe("orchestrator IPC handlers", () => {
       startBuildAgentRun: vi.fn(),
       listAgentRuns: vi.fn(),
       openPullRequest: vi.fn(),
-      listPullRequests: vi.fn()
+      listPullRequests: vi.fn(),
+      syncPullRequestReview: vi.fn()
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -342,6 +365,7 @@ describe("orchestrator IPC handlers", () => {
     await expect(ipc.invoke("plans:reject", { workstreamId: "ws-1", planId: "plan-1", reason: "" })).rejects.toThrow(/reason/i);
     await expect(ipc.invoke("agents:start-build-run", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
     await expect(ipc.invoke("pull-requests:open", { workstreamId: "ws-1", agentRunId: "../bad" })).rejects.toThrow(/agentRunId/i);
+    await expect(ipc.invoke("pull-requests:sync-review", { workstreamId: "ws-1", pullRequestId: "../bad" })).rejects.toThrow(/pullRequestId/i);
     await expect(ipc.invoke("pull-requests:list", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
     expect(orchestrator.createWorkstream).not.toHaveBeenCalled();
     expect(orchestrator.updateWorkstreamStatus).not.toHaveBeenCalled();

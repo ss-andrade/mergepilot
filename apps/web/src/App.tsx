@@ -390,6 +390,24 @@ export function App() {
     }
   }
 
+  async function syncPullRequestReview(pullRequest: PullRequest) {
+    setError(null);
+    try {
+      const reviewed = await window.mergePilot.pullRequests.syncReview({
+        workstreamId: pullRequest.workstreamId,
+        pullRequestId: pullRequest.id
+      });
+      setHumanAttentionMessage(
+        reviewed.humanAction === "merge"
+          ? "Review summary complete. PR checks passed and this workstream is ready to merge."
+          : reviewed.reviewSummary ?? "Review sync needs human attention."
+      );
+      await refreshOrchestrator(pullRequest.workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to sync pull request review.");
+    }
+  }
+
   function submitWorkstream(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void createWorkstream(formState);
@@ -830,13 +848,25 @@ export function App() {
                       <div className="mp-agent-run-actions">
                         <Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "warning"}>{run.status}</Badge>
                         {pullRequestState.pullRequests.find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open") ? (
-                          <a
-                            href={pullRequestState.pullRequests.find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open")?.prUrl ?? undefined}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            View PR
-                          </a>
+                          <>
+                            <a
+                              href={pullRequestState.pullRequests.find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open")?.prUrl ?? undefined}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View PR
+                            </a>
+                            <Button
+                              variant="secondary"
+                              onClick={() => {
+                                const pullRequest = pullRequestState.pullRequests.find((candidate) => candidate.agentRunId === run.id && candidate.status === "open");
+                                if (pullRequest) void syncPullRequestReview(pullRequest);
+                              }}
+                            >
+                              <ShieldCheckIcon aria-hidden="true" />
+                              Sync review
+                            </Button>
+                          </>
                         ) : selectedWorkstream?.status === "awaiting_review" && run.status === "completed" ? (
                           <Button variant="secondary" onClick={() => void openPullRequestForRun(run)}>
                             <GitPullRequestIcon aria-hidden="true" />
@@ -855,6 +885,39 @@ export function App() {
                 </div>
               )}
             </Panel>
+
+            {pullRequestState.pullRequests.length > 0 ? (
+              <Panel className="mp-review-summary" aria-label="Pull request review summary">
+                <div className="mp-section-heading">
+                  <div>
+                    <p className="mp-eyebrow">Review summary</p>
+                    <h3>PR checks and human action</h3>
+                  </div>
+                </div>
+                <div className="mp-agent-run-list">
+                  {pullRequestState.pullRequests.map((pullRequest) => (
+                    <div className="mp-agent-run-row" key={pullRequest.id}>
+                      <div>
+                        <strong>{pullRequest.title}</strong>
+                        <p>{pullRequest.reviewSummary ?? pullRequest.ciSummary ?? "Review sync has not run yet."}</p>
+                        <p>Changed files: {pullRequest.changedFiles.length > 0 ? pullRequest.changedFiles.join(", ") : "not synced"}</p>
+                        <p>Tests: {pullRequest.testCommands.length > 0 ? pullRequest.testCommands.join(", ") : "not synced"}</p>
+                        {pullRequest.riskSummary ? <p>Risks: {pullRequest.riskSummary}</p> : null}
+                      </div>
+                      <div className="mp-agent-run-actions">
+                        <Badge tone={pullRequest.checksStatus === "passed" ? "success" : pullRequest.checksStatus === "failed" ? "danger" : "warning"}>
+                          checks: {pullRequest.checksStatus}
+                        </Badge>
+                        <Badge tone={pullRequest.reviewStatus === "ready" ? "success" : pullRequest.reviewStatus === "blocked" ? "danger" : "warning"}>
+                          review: {pullRequest.reviewStatus}
+                        </Badge>
+                        {pullRequest.humanAction ? <Badge tone={pullRequest.humanAction === "merge" ? "success" : "warning"}>action: {pullRequest.humanAction}</Badge> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            ) : null}
 
             <Panel className="mp-timeline" id="timeline" aria-label="Event timeline">
               <div className="mp-section-heading">
@@ -911,7 +974,7 @@ export function App() {
               <h3>Operational lanes</h3>
               <StatusLine icon={<SparklesIcon />} label="Plan review" value="Ready" />
               <StatusLine icon={<BotIcon />} label="Build agents" value={isRunning ? "Available" : "Paused"} />
-              <StatusLine icon={<GitPullRequestIcon />} label="PR checks" value="Waiting" />
+              <StatusLine icon={<GitPullRequestIcon />} label="PR checks" value={pullRequestState.pullRequests.at(-1)?.checksStatus ?? "Waiting"} />
             </Panel>
 
             <Panel className="mp-settings-card" id="settings">

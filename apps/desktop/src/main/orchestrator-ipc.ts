@@ -7,6 +7,7 @@ import type {
   ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   OpenPullRequestInput,
+  SyncPullRequestReviewInput,
   StartBuildAgentRunInput,
   WorkstreamGitHubRepositoryScope,
   WorkstreamEventType,
@@ -47,6 +48,7 @@ export function registerOrchestratorIpcHandlers(
     | "listAgentRuns"
     | "openPullRequest"
     | "listPullRequests"
+    | "syncPullRequestReview"
     | "appendEvent"
     | "listEvents"
   >
@@ -124,6 +126,10 @@ export function registerOrchestratorIpcHandlers(
 
   ipc.handle("pull-requests:list", (_event, rawInput) => {
     return orchestrator.listPullRequests(parseIdInput(rawInput, "workstreamId"));
+  });
+
+  ipc.handle("pull-requests:sync-review", (_event, rawInput) => {
+    return orchestrator.syncPullRequestReview(parseSyncPullRequestReviewInput(rawInput));
   });
 
   ipc.handle("events:append", (_event, rawInput) => {
@@ -245,6 +251,14 @@ function parseOpenPullRequestInput(rawInput: unknown): OpenPullRequestInput {
     parsed.body = requireBoundedString(input.body, "body", 10000);
   }
   return parsed;
+}
+
+function parseSyncPullRequestReviewInput(rawInput: unknown): SyncPullRequestReviewInput {
+  const input = requireRecord(rawInput);
+  return {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId"),
+    pullRequestId: parseIdInput(input.pullRequestId, "pullRequestId")
+  };
 }
 
 function parseAppendEventInput(rawInput: unknown): AppendWorkstreamEventInput {
