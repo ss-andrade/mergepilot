@@ -415,7 +415,7 @@ function artifactEvent(
   runId: string,
   timestamp: string,
   artifactType: AgentRunArtifactEvent["artifactType"],
-  event: Pick<AgentRunArtifactEvent, "content" | "metadata">,
+  event: Partial<Pick<AgentRunArtifactEvent, "content" | "metadata">>,
 ): AgentRunArtifactEvent {
   return {
     type: "artifact",
