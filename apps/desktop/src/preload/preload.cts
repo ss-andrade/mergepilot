@@ -164,6 +164,29 @@ interface StartBuildAgentRunInput {
   planId?: string;
 }
 
+interface PullRequest {
+  id: string;
+  workstreamId: string;
+  agentRunId: string;
+  branchName: string;
+  commitSha: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  title: string;
+  body: string;
+  status: "open" | "failed";
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface OpenPullRequestInput {
+  workstreamId: string;
+  agentRunId: string;
+  title?: string;
+  body?: string;
+}
+
 export interface MergePilotDesktopApi {
   readonly appInfo: {
     readonly name: "MergePilot";
@@ -202,6 +225,10 @@ export interface MergePilotDesktopApi {
   agents: {
     startBuildRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
     listRuns(workstreamId: string): Promise<AgentRun[]>;
+  };
+  pullRequests: {
+    open(input: OpenPullRequestInput): Promise<PullRequest>;
+    list(workstreamId: string): Promise<PullRequest[]>;
   };
 }
 
@@ -243,6 +270,10 @@ const desktopApi: MergePilotDesktopApi = {
   agents: {
     startBuildRun: (input) => ipcRenderer.invoke("agents:start-build-run", input),
     listRuns: (workstreamId) => ipcRenderer.invoke("agents:list-runs", { workstreamId })
+  },
+  pullRequests: {
+    open: (input) => ipcRenderer.invoke("pull-requests:open", input),
+    list: (workstreamId) => ipcRenderer.invoke("pull-requests:list", { workstreamId })
   }
 };
 

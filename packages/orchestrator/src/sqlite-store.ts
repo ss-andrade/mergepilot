@@ -13,6 +13,8 @@ import {
   OrchestratorStore,
   PlanDecisionInput,
   Plan,
+  PullRequest,
+  CreatePullRequestInput,
   ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   UpdateAgentRunInput,
@@ -87,6 +89,21 @@ type AgentRunRow = Omit<
   branch_name: string | null;
   started_at: string | null;
   completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type PullRequestRow = Omit<
+  PullRequest,
+  "workstreamId" | "agentRunId" | "branchName" | "commitSha" | "prNumber" | "prUrl" | "errorMessage" | "createdAt" | "updatedAt"
+> & {
+  workstream_id: string;
+  agent_run_id: string;
+  branch_name: string;
+  commit_sha: string;
+  pr_number: number | null;
+  pr_url: string | null;
+  error_message: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -520,6 +537,117 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     return rows.map(mapAgentRunRow);
   }
 
+  createPullRequest(input: CreatePullRequestInput): PullRequest {
+    const workstreamId = requireId(input.workstreamId, "workstreamId");
+    const agentRunId = requireId(input.agentRunId, "agentRunId");
+    const workstream = this.getWorkstream(workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+    const run = this.db
+      .prepare("SELECT * FROM agent_runs WHERE id = ? AND workstream_id = ?")
+      .get(agentRunId, workstreamId) as AgentRunRow | undefined;
+    if (!run) {
+      throw new Error(`Agent run ${agentRunId} was not found for workstream ${workstreamId}.`);
+    }
+    const status = input.status === "failed" ? "failed" : "open";
+    const now = new Date().toISOString();
+    const pullRequest: PullRequest = {
+      id: input.id === undefined ? randomUUID() : requireId(input.id, "pullRequestId"),
+      workstreamId,
+      agentRunId,
+      branchName: requireString(input.branchName, "branchName", 250),
+      commitSha: requireString(input.commitSha, "commitSha", 120),
+      prNumber: input.prNumber ?? null,
+      prUrl: normalizeOptionalString(input.prUrl, 2048),
+      title: requireString(input.title, "title", 200),
+      body: requireString(input.body, "body", 10000),
+      status,
+      errorMessage: normalizeOptionalString(input.errorMessage, 2000),
+      createdAt: now,
+      updatedAt: now
+    };
+    if (pullRequest.status === "open" && (!pullRequest.prUrl || pullRequest.prNumber === null)) {
+      throw new Error("Open pull requests require a PR number and URL.");
+    }
+    this.db
+      .prepare(`INSERT INTO pull_requests (
+        id, workstream_id, agent_run_id, branch_name, commit_sha, pr_number, pr_url, title, body, status, error_message, created_at, updated_at
+      ) VALUES (
+        @id, @workstreamId, @agentRunId, @branchName, @commitSha, @prNumber, @prUrl, @title, @body, @status, @errorMessage, @createdAt, @updatedAt
+      )`)
+      .run(pullRequest);
+    return pullRequest;
+  }
+
+
+
+  recordPublishedPullRequest(input: CreatePullRequestInput): PullRequest {
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const existing = this.listPullRequests(input.workstreamId).find(
+        (pullRequest) => pullRequest.agentRunId === input.agentRunId && pullRequest.status === "open"
+      );
+      if (existing) {
+        return existing;
+      }
+      const pullRequest = this.createPullRequest(input);
+      this.appendEventRecord({
+        workstreamId: pullRequest.workstreamId,
+        type: "commit_created",
+        message: "Build-agent changes committed.",
+        payload: { agentRunId: pullRequest.agentRunId, commitSha: pullRequest.commitSha, branchName: pullRequest.branchName },
+        createdAt: now
+      });
+      this.appendEventRecord({
+        workstreamId: pullRequest.workstreamId,
+        type: "branch_pushed",
+        message: "Build-agent branch pushed.",
+        payload: { agentRunId: pullRequest.agentRunId, branchName: pullRequest.branchName, commitSha: pullRequest.commitSha },
+        createdAt: now
+      });
+      this.appendEventRecord({
+        workstreamId: pullRequest.workstreamId,
+        type: "pr_opened",
+        message: `Pull request opened: ${pullRequest.prUrl}`,
+        payload: {
+          agentRunId: pullRequest.agentRunId,
+          pullRequestId: pullRequest.id,
+          prNumber: pullRequest.prNumber,
+          prUrl: pullRequest.prUrl
+        },
+        createdAt: now
+      });
+      this.setWorkstreamStatusUnchecked(pullRequest.workstreamId, "merge_ready", now);
+      return pullRequest;
+    })();
+  }
+
+  recordFailedPullRequest(input: CreatePullRequestInput): PullRequest {
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const pullRequest = this.createPullRequest(input);
+      this.appendEventRecord({
+        workstreamId: pullRequest.workstreamId,
+        type: "human_action_required",
+        message: "Pull request creation failed.",
+        payload: { agentRunId: pullRequest.agentRunId, pullRequestId: pullRequest.id, errorMessage: pullRequest.errorMessage },
+        createdAt: now
+      });
+      this.setWorkstreamStatusUnchecked(pullRequest.workstreamId, "awaiting_user_input", now);
+      return pullRequest;
+    })();
+  }
+
+  listPullRequests(workstreamId: string): PullRequest[] {
+    const id = requireId(workstreamId, "workstreamId");
+    this.requireWorkstream(id);
+    const rows = this.db
+      .prepare("SELECT * FROM pull_requests WHERE workstream_id = ? ORDER BY created_at ASC")
+      .all(id) as PullRequestRow[];
+    return rows.map(mapPullRequestRow);
+  }
+
   private decidePlan(input: PlanDecisionInput, status: "approved" | "rejected"): Plan {
     const workstreamId = requireId(input.workstreamId, "workstreamId");
     const planId = requireId(input.planId, "planId");
@@ -720,6 +848,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        id TEXT PRIMARY KEY,
+        workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+        agent_run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        branch_name TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        pr_number INTEGER,
+        pr_url TEXT,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'failed')),
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS github_repositories (
         id TEXT PRIMARY KEY,
         owner TEXT NOT NULL,
@@ -741,11 +885,16 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         ON agent_runs(workstream_id);
       CREATE INDEX IF NOT EXISTS idx_github_repositories_selected
         ON github_repositories(selected_at);
+      CREATE INDEX IF NOT EXISTS idx_pull_requests_workstream
+        ON pull_requests(workstream_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pull_requests_open_agent_run
+        ON pull_requests(agent_run_id) WHERE status = 'open';
     `);
     this.ensureWorkstreamsGitHubRepositorySchema();
     this.ensureWorkstreamEventsSchema();
     this.ensurePlansSchema();
     this.ensureAgentRunsSchema();
+    this.ensurePullRequestsSchema();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
         ON workstream_events(workstream_id, sequence);
@@ -773,6 +922,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     this.db.pragma("foreign_keys = OFF");
     const migrateLegacyData = this.db.transaction(() => {
       this.db.exec(`
+        DROP TABLE IF EXISTS pull_requests;
         DROP TABLE IF EXISTS agent_runs;
         DROP TABLE IF EXISTS plans;
         DROP TABLE IF EXISTS workstream_events;
@@ -843,6 +993,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
           summary TEXT,
           started_at TEXT,
           completed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE pull_requests (
+          id TEXT PRIMARY KEY,
+          workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          agent_run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+          branch_name TEXT NOT NULL,
+          commit_sha TEXT NOT NULL,
+          pr_number INTEGER,
+          pr_url TEXT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('open', 'failed')),
+          error_message TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -1005,6 +1171,30 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     }
   }
 
+  private ensurePullRequestsSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        id TEXT PRIMARY KEY,
+        workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+        agent_run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        branch_name TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        pr_number INTEGER,
+        pr_url TEXT,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'failed')),
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pull_requests_workstream
+        ON pull_requests(workstream_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pull_requests_open_agent_run
+        ON pull_requests(agent_run_id) WHERE status = 'open';
+    `);
+  }
+
   private createEventImmutabilityTriggers(): void {
     this.db.exec(`
       CREATE TRIGGER IF NOT EXISTS trg_workstream_events_no_update
@@ -1036,6 +1226,24 @@ function mapWorkstreamRow(row: WorkstreamRow): Workstream {
     githubRepository: row.github_repository_json === null ? null : JSON.parse(row.github_repository_json),
     createdBy: row.created_by,
     summary: row.summary,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapPullRequestRow(row: PullRequestRow): PullRequest {
+  return {
+    id: row.id,
+    workstreamId: row.workstream_id,
+    agentRunId: row.agent_run_id,
+    branchName: row.branch_name,
+    commitSha: row.commit_sha,
+    prNumber: row.pr_number,
+    prUrl: row.pr_url,
+    title: row.title,
+    body: row.body,
+    status: row.status,
+    errorMessage: row.error_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

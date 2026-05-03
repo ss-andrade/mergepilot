@@ -15,6 +15,7 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
     let sequence = 0;
     const createCalls: CreateWorkstreamInput[] = [];
     const agentRuns: AgentRun[] = [];
+    const pullRequests: PullRequest[] = [];
     const plans: Plan[] = [
       {
         id: "plan-seeded",
@@ -351,6 +352,46 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           return run;
         },
         listRuns: async (workstreamId) => agentRuns.filter((run) => run.workstreamId === workstreamId)
+      },
+      pullRequests: {
+        open: async ({ workstreamId, agentRunId }) => {
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          const run = agentRuns.find((item) => item.id === agentRunId && item.workstreamId === workstreamId);
+          if (!workstream || !run) {
+            throw new Error("Missing completed build-agent run.");
+          }
+          const existing = pullRequests.find((pullRequest) => pullRequest.agentRunId === agentRunId && pullRequest.status === "open");
+          if (existing) return existing;
+          const created: PullRequest = {
+            id: `pr-${pullRequests.length + 1}`,
+            workstreamId,
+            agentRunId,
+            branchName: run.branchName ?? `mergepilot/${workstreamId}/build/${agentRunId}`,
+            commitSha: "abc123def456",
+            prNumber: 42,
+            prUrl: "https://github.com/ss-andrade/mergepilot/pull/42",
+            title: `${workstream.title}: build-agent changes`,
+            body: "Mock pull request body.",
+            status: "open",
+            errorMessage: null,
+            createdAt: now,
+            updatedAt: now
+          };
+          pullRequests.push(created);
+          workstream.status = "merge_ready";
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "pr_opened",
+            message: `Pull request opened: ${created.prUrl}`,
+            payload: { pullRequestId: created.id, prUrl: created.prUrl },
+            createdAt: now
+          });
+          sequence += 1;
+          return created;
+        },
+        list: async (workstreamId) => pullRequests.filter((pullRequest) => pullRequest.workstreamId === workstreamId)
       }
     };
   });
@@ -386,6 +427,11 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("command_ran");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("agent_completed");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("awaiting_review");
+  await page.getByRole("button", { name: "Open PR" }).click();
+  await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("View PR");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("pr_opened");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("https://github.com/ss-andrade/mergepilot/pull/42");
+  await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("merge_ready");
   await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Plan approvals, blockers, and access requests");
 
   await page.getByRole("button", { name: /^Review dependency update awaiting_review$/ }).click();

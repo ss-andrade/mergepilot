@@ -159,6 +159,30 @@ interface AgentRun {
 
 interface StartBuildAgentRunInput {
   workstreamId: string;
+  planId?: string;
+}
+
+interface PullRequest {
+  id: string;
+  workstreamId: string;
+  agentRunId: string;
+  branchName: string;
+  commitSha: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  title: string;
+  body: string;
+  status: "open" | "failed";
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface OpenPullRequestInput {
+  workstreamId: string;
+  agentRunId: string;
+  title?: string;
+  body?: string;
 }
 
 interface MergePilotDesktopApi {
@@ -199,6 +223,10 @@ interface MergePilotDesktopApi {
   agents: {
     startBuildRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
     listRuns(workstreamId: string): Promise<AgentRun[]>;
+  };
+  pullRequests: {
+    open(input: OpenPullRequestInput): Promise<PullRequest>;
+    list(workstreamId: string): Promise<PullRequest[]>;
   };
 }
 

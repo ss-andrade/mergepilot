@@ -52,6 +52,11 @@ interface AgentRunState {
   runs: AgentRun[];
 }
 
+interface PullRequestState {
+  selectedWorkstreamId: string | null;
+  pullRequests: PullRequest[];
+}
+
 interface WorkstreamFormState {
   title: string;
   goal: string;
@@ -144,6 +149,7 @@ export function App() {
   const [timeline, setTimeline] = useState<TimelineState>({ selectedWorkstreamId: null, events: [] });
   const [planState, setPlanState] = useState<PlanState>({ selectedWorkstreamId: null, plans: [] });
   const [agentRunState, setAgentRunState] = useState<AgentRunState>({ selectedWorkstreamId: null, runs: [] });
+  const [pullRequestState, setPullRequestState] = useState<PullRequestState>({ selectedWorkstreamId: null, pullRequests: [] });
   const [error, setError] = useState<string | null>(null);
   const [humanAttentionMessage, setHumanAttentionMessage] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
@@ -194,6 +200,7 @@ export function App() {
       setTimeline({ selectedWorkstreamId: null, events: [] });
       setPlanState({ selectedWorkstreamId: null, plans: [] });
       setAgentRunState({ selectedWorkstreamId: null, runs: [] });
+      setPullRequestState({ selectedWorkstreamId: null, pullRequests: [] });
       return;
     }
 
@@ -206,19 +213,21 @@ export function App() {
     const selected = preferredWorkstreamId ?? timeline.selectedWorkstreamId ?? nextWorkstreams[0]?.id ?? null;
     const selectedExists = selected ? nextWorkstreams.some((workstream) => workstream.id === selected) : false;
     const nextSelected = selectedExists ? selected : nextWorkstreams[0]?.id ?? null;
-    const [nextEvents, nextPlans, nextAgentRuns] = nextSelected
+    const [nextEvents, nextPlans, nextAgentRuns, nextPullRequests] = nextSelected
       ? await Promise.all([
           window.mergePilot.events.list(nextSelected),
           window.mergePilot.plans.list(nextSelected),
-          window.mergePilot.agents.listRuns(nextSelected)
+          window.mergePilot.agents.listRuns(nextSelected),
+          window.mergePilot.pullRequests.list(nextSelected)
         ])
-      : [[], [], []];
+      : [[], [], [], []];
     setTimeline({
       selectedWorkstreamId: nextSelected,
       events: nextEvents
     });
     setPlanState({ selectedWorkstreamId: nextSelected, plans: nextPlans });
     setAgentRunState({ selectedWorkstreamId: nextSelected, runs: nextAgentRuns });
+    setPullRequestState({ selectedWorkstreamId: nextSelected, pullRequests: nextPullRequests });
   }
 
   async function startOrchestrator() {
@@ -241,6 +250,7 @@ export function App() {
       setTimeline({ selectedWorkstreamId: null, events: [] });
       setPlanState({ selectedWorkstreamId: null, plans: [] });
       setAgentRunState({ selectedWorkstreamId: null, runs: [] });
+      setPullRequestState({ selectedWorkstreamId: null, pullRequests: [] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to stop orchestrator.");
     }
@@ -306,14 +316,16 @@ export function App() {
   }
 
   async function selectWorkstream(workstreamId: string) {
-    const [events, plans, runs] = await Promise.all([
+    const [events, plans, runs, pullRequests] = await Promise.all([
       window.mergePilot.events.list(workstreamId),
       window.mergePilot.plans.list(workstreamId),
-      window.mergePilot.agents.listRuns(workstreamId)
+      window.mergePilot.agents.listRuns(workstreamId),
+      window.mergePilot.pullRequests.list(workstreamId)
     ]);
     setTimeline({ selectedWorkstreamId: workstreamId, events });
     setPlanState({ selectedWorkstreamId: workstreamId, plans });
     setAgentRunState({ selectedWorkstreamId: workstreamId, runs });
+    setPullRequestState({ selectedWorkstreamId: workstreamId, pullRequests });
     setSidebarOpen(false);
   }
 
@@ -360,6 +372,21 @@ export function App() {
       await refreshOrchestrator(workstreamId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to start build agent run.");
+    }
+  }
+
+  async function openPullRequestForRun(run: AgentRun) {
+    setError(null);
+    try {
+      const pullRequest = await window.mergePilot.pullRequests.open({ workstreamId: run.workstreamId, agentRunId: run.id });
+      setHumanAttentionMessage(
+        pullRequest.status === "open" && pullRequest.prUrl
+          ? `Pull request opened: ${pullRequest.prUrl}`
+          : pullRequest.errorMessage ?? "Pull request creation needs human attention."
+      );
+      await refreshOrchestrator(run.workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to open pull request.");
     }
   }
 
@@ -800,7 +827,23 @@ export function App() {
                         <p>{run.summary ?? run.goal}</p>
                         {run.workspacePath ? <code>{run.workspacePath}</code> : null}
                       </div>
-                      <Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "warning"}>{run.status}</Badge>
+                      <div className="mp-agent-run-actions">
+                        <Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "warning"}>{run.status}</Badge>
+                        {pullRequestState.pullRequests.find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open") ? (
+                          <a
+                            href={pullRequestState.pullRequests.find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open")?.prUrl ?? undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            View PR
+                          </a>
+                        ) : selectedWorkstream?.status === "awaiting_review" && run.status === "completed" ? (
+                          <Button variant="secondary" onClick={() => void openPullRequestForRun(run)}>
+                            <GitPullRequestIcon aria-hidden="true" />
+                            Open PR
+                          </Button>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>

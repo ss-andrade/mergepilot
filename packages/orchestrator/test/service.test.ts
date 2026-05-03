@@ -248,6 +248,147 @@ describe("LocalOrchestratorService", () => {
     await orchestrator.stop();
   });
 
+  it("opens a pull request from a completed build-agent run and links it to the timeline", async () => {
+    const dataDir = await createTempDir();
+    const pullRequestPublisher = {
+      openPullRequest: vi.fn(async (input) => ({
+        branchName: input.agentRun.branchName ?? "mergepilot/ws-1/build/run-1",
+        commitSha: "abc123def456",
+        prNumber: 42,
+        prUrl: "https://github.com/ss-andrade/mergepilot/pull/42"
+      }))
+    };
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Branch and PR",
+      goal: "Open a pull request from completed agent work.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(pullRequestPublisher.openPullRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workstream: expect.objectContaining({ id: workstream.id }),
+        agentRun: expect.objectContaining({ id: run.id, branchName: run.branchName }),
+        title: "Branch and PR: build-agent changes"
+      })
+    );
+    expect(pullRequest).toMatchObject({
+      workstreamId: workstream.id,
+      agentRunId: run.id,
+      branchName: run.branchName,
+      commitSha: "abc123def456",
+      prNumber: 42,
+      prUrl: "https://github.com/ss-andrade/mergepilot/pull/42",
+      status: "open"
+    });
+    expect(orchestrator.listPullRequests(workstream.id)).toEqual([expect.objectContaining({ id: pullRequest.id })]);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+    expect(orchestrator.listEvents(workstream.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "commit_created", payload: expect.objectContaining({ commitSha: "abc123def456" }) }),
+        expect.objectContaining({ type: "branch_pushed", payload: expect.objectContaining({ branchName: run.branchName }) }),
+        expect.objectContaining({ type: "pr_opened", message: expect.stringContaining("https://github.com/ss-andrade/mergepilot/pull/42") })
+      ])
+    );
+
+    await expect(orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id })).resolves.toMatchObject({ id: pullRequest.id });
+    expect(pullRequestPublisher.openPullRequest).toHaveBeenCalledTimes(1);
+
+    await orchestrator.stop();
+  });
+
+  it("blocks concurrent pull request publication for the same agent run", async () => {
+    const dataDir = await createTempDir();
+    let releasePublisher!: () => void;
+    let publisherStarted!: () => void;
+    const publisherStartedPromise = new Promise<void>((resolve) => {
+      publisherStarted = resolve;
+    });
+    const releasePublisherPromise = new Promise<void>((resolve) => {
+      releasePublisher = resolve;
+    });
+    const pullRequestPublisher = {
+      openPullRequest: vi.fn(async (input) => {
+        publisherStarted();
+        await releasePublisherPromise;
+        return {
+          branchName: input.agentRun.branchName ?? "mergepilot/ws-1/build/run-1",
+          commitSha: "abc123def456",
+          prNumber: 42,
+          prUrl: "https://github.com/ss-andrade/mergepilot/pull/42"
+        };
+      })
+    };
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Concurrent PR",
+      goal: "Avoid duplicate pull request publication.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+
+    const firstOpen = orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+    await publisherStartedPromise;
+
+    await expect(orchestrator.stop()).rejects.toThrow(/active/i);
+    await expect(orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id })).rejects.toThrow(/already being opened/i);
+
+    releasePublisher();
+    await expect(firstOpen).resolves.toMatchObject({ status: "open", prNumber: 42 });
+    expect(pullRequestPublisher.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(orchestrator.listPullRequests(workstream.id).filter((pullRequest) => pullRequest.status === "open")).toHaveLength(1);
+
+    await orchestrator.stop();
+  });
+
+  it("creates a human attention item when pull request publication fails", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestPublisher: {
+        openPullRequest: vi.fn(async () => {
+          throw new Error("push rejected");
+        })
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "PR failure",
+      goal: "Surface failed branch publication.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(pullRequest).toMatchObject({ status: "failed", errorMessage: "push rejected", prUrl: null });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
+    expect(orchestrator.listEvents(workstream.id).at(-1)).toMatchObject({
+      type: "human_action_required",
+      message: "Pull request creation failed.",
+      payload: expect.objectContaining({ errorMessage: "push rejected" })
+    });
+
+    await orchestrator.stop();
+  });
+
   it("keeps active build-agent runs lifecycle-safe until they settle", async () => {
     const dataDir = await createTempDir();
     let releaseRun!: () => void;

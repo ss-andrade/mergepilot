@@ -15,13 +15,17 @@ import {
   ConnectGitHubRepositoryInput,
   CreateAgentRunInput,
   CreatePlanInput,
+  CreatePullRequestInput,
   CreateWorkstreamInput,
   LocalOrchestratorService,
   OrchestratorStatus,
   OrchestratorStore,
   Plan,
+  OpenPullRequestInput,
   PlanDecisionInput,
   ProposePlanInput,
+  PullRequest,
+  PullRequestPublisher,
   ReportGitHubRepositoryConnectionErrorInput,
   StartBuildAgentRunInput,
   UpdateAgentRunInput,
@@ -37,11 +41,14 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
   private store: OrchestratorStore | null = null;
   private readonly databasePath: string;
   private readonly buildAgentAdapter: AgentAdapter;
+  private readonly pullRequestPublisher: PullRequestPublisher;
   private readonly activeBuildWorkstreamIds = new Set<string>();
+  private readonly activePullRequestRunIds = new Set<string>();
 
   constructor(private readonly options: LocalOrchestratorOptions) {
     this.databasePath = path.join(options.dataDir, "mergepilot.sqlite3");
     this.buildAgentAdapter = options.buildAgentAdapter ?? new DeterministicBuildAgentAdapter();
+    this.pullRequestPublisher = options.pullRequestPublisher ?? new DeterministicPullRequestPublisher();
   }
 
   async start(): Promise<void> {
@@ -53,8 +60,8 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
   }
 
   async stop(): Promise<void> {
-    if (this.activeBuildWorkstreamIds.size > 0) {
-      throw new Error("Cannot stop the local orchestrator while build-agent runs are active.");
+    if (this.activeBuildWorkstreamIds.size > 0 || this.activePullRequestRunIds.size > 0) {
+      throw new Error("Cannot stop the local orchestrator while agent lifecycle operations are active.");
     }
     this.store?.close();
     this.store = null;
@@ -144,6 +151,73 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
     return this.requireStore().listAgentRuns(workstreamId);
   }
 
+  createPullRequest(input: CreatePullRequestInput) {
+    return this.requireStore().createPullRequest(input);
+  }
+
+  listPullRequests(workstreamId: string) {
+    return this.requireStore().listPullRequests(workstreamId);
+  }
+
+  async openPullRequest(input: OpenPullRequestInput): Promise<PullRequest> {
+    const store = this.requireStore();
+    const workstream = store.getWorkstream(input.workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${input.workstreamId} was not found.`);
+    }
+    const run = store.listAgentRuns(workstream.id).find((candidate) => candidate.id === input.agentRunId);
+    if (!run) {
+      throw new Error(`Agent run ${input.agentRunId} was not found for workstream ${workstream.id}.`);
+    }
+    if (run.status !== "completed" || !run.branchName) {
+      throw new Error("Pull requests can only be opened from completed build-agent runs with branch metadata.");
+    }
+    const existing = store.listPullRequests(workstream.id).find((pullRequest) => pullRequest.agentRunId === run.id && pullRequest.status === "open");
+    if (existing) {
+      return existing;
+    }
+    if (workstream.status !== "awaiting_review") {
+      throw new Error("A completed build-agent run awaiting review is required before opening a pull request.");
+    }
+    if (this.activePullRequestRunIds.has(run.id)) {
+      throw new Error("A pull request is already being opened for this agent run.");
+    }
+
+    const title = input.title?.trim() || `${workstream.title}: build-agent changes`;
+    const body = input.body?.trim() || `Automated build-agent changes for workstream ${workstream.id}.`;
+    this.activePullRequestRunIds.add(run.id);
+    try {
+      const published = await this.pullRequestPublisher.openPullRequest({ workstream, agentRun: run, title, body });
+      return store.recordPublishedPullRequest({
+        workstreamId: workstream.id,
+        agentRunId: run.id,
+        branchName: published.branchName,
+        commitSha: published.commitSha,
+        prNumber: published.prNumber,
+        prUrl: published.prUrl,
+        title,
+        body,
+        status: "open"
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return store.recordFailedPullRequest({
+        workstreamId: workstream.id,
+        agentRunId: run.id,
+        branchName: run.branchName,
+        commitSha: "unpublished",
+        prNumber: null,
+        prUrl: null,
+        title,
+        body,
+        status: "failed",
+        errorMessage: message
+      });
+    } finally {
+      this.activePullRequestRunIds.delete(run.id);
+    }
+  }
+
   async startBuildAgentRun(input: StartBuildAgentRunInput): Promise<AgentRun> {
     const store = this.requireStore();
     const workstream = store.getWorkstream(input.workstreamId);
@@ -171,21 +245,21 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
       await mkdir(workspacePath, { recursive: true });
 
       let run = store.createAgentRun({
-      id: runId,
-      workstreamId: workstream.id,
-      planId: approvedPlan.id,
-      providerId: this.buildAgentAdapter.metadata.providerId,
-      adapterId: this.buildAgentAdapter.metadata.adapterId ?? this.buildAgentAdapter.metadata.providerId,
-      role: "build",
-      status: "queued",
-      goal: workstream.goal,
-      workspacePath,
-      branchName
-    });
+        id: runId,
+        workstreamId: workstream.id,
+        planId: approvedPlan.id,
+        providerId: this.buildAgentAdapter.metadata.providerId,
+        adapterId: this.buildAgentAdapter.metadata.adapterId ?? this.buildAgentAdapter.metadata.providerId,
+        role: "build",
+        status: "queued",
+        goal: workstream.goal,
+        workspacePath,
+        branchName
+      });
 
-    const startedAt = new Date().toISOString();
-    run = store.updateAgentRun({ id: run.id, status: "running", startedAt });
-    store.appendEvent({
+      const startedAt = new Date().toISOString();
+      run = store.updateAgentRun({ id: run.id, status: "running", startedAt });
+      store.appendEvent({
       workstreamId: workstream.id,
       type: "agent_started",
       message: "Build agent run started.",
@@ -377,6 +451,32 @@ function truncateForPayload(content: string | undefined): string | undefined {
     return undefined;
   }
   return content.length > 4000 ? `${content.slice(0, 4000)}…` : content;
+}
+
+class DeterministicPullRequestPublisher implements PullRequestPublisher {
+  async openPullRequest(input: Parameters<PullRequestPublisher["openPullRequest"]>[0]): Promise<{ branchName: string; commitSha: string; prNumber: number; prUrl: string }> {
+    const [owner, name] = input.workstream.repo.split("/");
+    const safeOwner = owner || "local";
+    const safeName = name || "repository";
+    const branchName = input.agentRun.branchName ?? `mergepilot/${input.workstream.id}/build/${input.agentRun.id}`;
+    const commitSha = `mp-${input.agentRun.id.replace(/[^A-Za-z0-9]/g, "").slice(0, 12).padEnd(12, "0")}`;
+    const prNumber = deterministicPullRequestNumber(input.workstream.id, input.agentRun.id);
+    return {
+      branchName,
+      commitSha,
+      prNumber,
+      prUrl: `https://github.com/${safeOwner}/${safeName}/pull/${prNumber}`
+    };
+  }
+}
+
+function deterministicPullRequestNumber(workstreamId: string, agentRunId: string): number {
+  const value = `${workstreamId}:${agentRunId}`;
+  let hash = 0;
+  for (const char of value) {
+    hash = (hash * 31 + char.charCodeAt(0)) % 9000;
+  }
+  return hash + 1000;
 }
 
 class DeterministicBuildAgentAdapter implements AgentAdapter {
