@@ -17,7 +17,7 @@ const workstreamStatuses = new Set([
 const allowedWorkstreamTransitions: Record<string, Set<string>> = {
   draft: new Set(["planning", "cancelled"]),
   planning: new Set(["awaiting_plan_approval", "cancelled"]),
-  awaiting_plan_approval: new Set(["running", "cancelled"]),
+  awaiting_plan_approval: new Set(["planning", "running", "cancelled"]),
   running: new Set(["awaiting_user_input", "awaiting_review", "failed", "cancelled"]),
   awaiting_user_input: new Set(["running", "cancelled"]),
   awaiting_review: new Set(["merge_ready", "running", "failed", "cancelled"]),
@@ -152,6 +152,22 @@ export function requirePlanStatus(value: unknown): "draft" | "approved" | "rejec
     throw new Error("status must be a valid plan status.");
   }
   return status as "draft" | "approved" | "rejected" | "superseded";
+}
+
+export function requireStringList(value: unknown, field: string, maxItems: number, maxItemLength: number): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be a non-empty string list.`);
+  }
+
+  if (value.length === 0) {
+    throw new Error(`${field} must include at least one item.`);
+  }
+
+  if (value.length > maxItems) {
+    throw new Error(`${field} must include ${maxItems} items or fewer.`);
+  }
+
+  return value.map((item, index) => requireString(item as string, `${field}[${index}]`, maxItemLength));
 }
 
 export function requireAgentRunStatus(value: unknown): "queued" | "running" | "completed" | "failed" | "cancelled" {

@@ -42,6 +42,11 @@ interface TimelineState {
   events: WorkstreamEvent[];
 }
 
+interface PlanState {
+  selectedWorkstreamId: string | null;
+  plans: Plan[];
+}
+
 interface WorkstreamFormState {
   title: string;
   goal: string;
@@ -132,6 +137,7 @@ export function App() {
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [repositories, setRepositories] = useState<GitHubRepositoryConnection[]>([]);
   const [timeline, setTimeline] = useState<TimelineState>({ selectedWorkstreamId: null, events: [] });
+  const [planState, setPlanState] = useState<PlanState>({ selectedWorkstreamId: null, plans: [] });
   const [error, setError] = useState<string | null>(null);
   const [humanAttentionMessage, setHumanAttentionMessage] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
@@ -147,6 +153,9 @@ export function App() {
   const isRunning = orchestratorStatus?.state === "running";
   const selectedWorkstream = workstreams.find((workstream) => workstream.id === timeline.selectedWorkstreamId) ?? null;
   const selectedRepository = repositories.find((repository) => repository.id === formState.repositoryId) ?? null;
+  const currentPlan = selectedWorkstream
+    ? planState.plans.find((plan) => plan.status === "draft") ?? planState.plans.at(-1) ?? null
+    : null;
 
   useEffect(() => {
     window.mergePilot.getRuntimeInfo().then(setRuntimeInfo).catch(() => {
@@ -177,6 +186,7 @@ export function App() {
       setWorkstreams([]);
       setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
+      setPlanState({ selectedWorkstreamId: null, plans: [] });
       return;
     }
 
@@ -189,10 +199,14 @@ export function App() {
     const selected = preferredWorkstreamId ?? timeline.selectedWorkstreamId ?? nextWorkstreams[0]?.id ?? null;
     const selectedExists = selected ? nextWorkstreams.some((workstream) => workstream.id === selected) : false;
     const nextSelected = selectedExists ? selected : nextWorkstreams[0]?.id ?? null;
+    const [nextEvents, nextPlans] = nextSelected
+      ? await Promise.all([window.mergePilot.events.list(nextSelected), window.mergePilot.plans.list(nextSelected)])
+      : [[], []];
     setTimeline({
       selectedWorkstreamId: nextSelected,
-      events: nextSelected ? await window.mergePilot.events.list(nextSelected) : []
+      events: nextEvents
     });
+    setPlanState({ selectedWorkstreamId: nextSelected, plans: nextPlans });
   }
 
   async function startOrchestrator() {
@@ -213,6 +227,7 @@ export function App() {
       setWorkstreams([]);
       setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
+      setPlanState({ selectedWorkstreamId: null, plans: [] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to stop orchestrator.");
     }
@@ -278,11 +293,48 @@ export function App() {
   }
 
   async function selectWorkstream(workstreamId: string) {
-    setTimeline({
-      selectedWorkstreamId: workstreamId,
-      events: await window.mergePilot.events.list(workstreamId)
-    });
+    const [events, plans] = await Promise.all([
+      window.mergePilot.events.list(workstreamId),
+      window.mergePilot.plans.list(workstreamId)
+    ]);
+    setTimeline({ selectedWorkstreamId: workstreamId, events });
+    setPlanState({ selectedWorkstreamId: workstreamId, plans });
     setSidebarOpen(false);
+  }
+
+  async function proposeCoordinatorPlan(workstreamId: string) {
+    setError(null);
+    try {
+      await window.mergePilot.plans.propose({ workstreamId });
+      await refreshOrchestrator(workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to generate coordinator plan.");
+    }
+  }
+
+  async function approveCoordinatorPlan(plan: Plan) {
+    setError(null);
+    try {
+      await window.mergePilot.plans.approve({ workstreamId: plan.workstreamId, planId: plan.id });
+      await refreshOrchestrator(plan.workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to approve coordinator plan.");
+    }
+  }
+
+  async function rejectCoordinatorPlan(plan: Plan) {
+    setError(null);
+    try {
+      await window.mergePilot.plans.reject({
+        workstreamId: plan.workstreamId,
+        planId: plan.id,
+        reason: "Needs edits before execution."
+      });
+      setHumanAttentionMessage("Coordinator plan rejected. Update the goal or generate a revised plan.");
+      await refreshOrchestrator(plan.workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to reject coordinator plan.");
+    }
   }
 
   function submitWorkstream(event: FormEvent<HTMLFormElement>) {
@@ -660,6 +712,46 @@ export function App() {
               </div>
             </Panel>
 
+            <Panel className="mp-coordinator-plan" role="region" aria-label="Coordinator plan">
+              <div className="mp-section-heading">
+                <div>
+                  <p className="mp-eyebrow">Coordinator planning loop</p>
+                  <h3>Coordinator plan</h3>
+                </div>
+                {selectedWorkstream ? (
+                  <Button variant="outline" onClick={() => void proposeCoordinatorPlan(selectedWorkstream.id)}>
+                    Generate plan
+                  </Button>
+                ) : null}
+              </div>
+              {currentPlan ? (
+                <div className="mp-plan-card">
+                  <div className="mp-section-heading">
+                    <div>
+                      <p className="mp-eyebrow">Goal restatement</p>
+                      <h4>{currentPlan.goalRestatement}</h4>
+                    </div>
+                    <Badge tone={currentPlan.status === "approved" ? "success" : currentPlan.status === "rejected" ? "danger" : "warning"}>{currentPlan.status}</Badge>
+                  </div>
+                  <PlanList title="Steps" items={currentPlan.steps} ordered />
+                  <PlanList title="Risks" items={currentPlan.risks} />
+                  <PlanList title="Expected outputs" items={currentPlan.expectedOutputs} />
+                  {currentPlan.status === "draft" ? (
+                    <div className="mp-card__footer">
+                      <Button variant="secondary" onClick={() => void approveCoordinatorPlan(currentPlan)}>Approve plan</Button>
+                      <Button variant="outline" onClick={() => void rejectCoordinatorPlan(currentPlan)}>Reject plan</Button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="mp-empty-state">
+                  <SparklesIcon aria-hidden="true" />
+                  <strong>No coordinator plan yet</strong>
+                  <p>Generate a plan to restate the goal, list steps, identify risks, and define expected outputs before execution.</p>
+                </div>
+              )}
+            </Panel>
+
             <Panel className="mp-timeline" id="timeline" aria-label="Event timeline">
               <div className="mp-section-heading">
                 <div>
@@ -745,6 +837,20 @@ export function App() {
         setQuery={setCommandQuery}
       />
     </main>
+  );
+}
+
+function PlanList({ items, ordered = false, title }: { items: string[]; ordered?: boolean; title: string }) {
+  const ListTag = ordered ? "ol" : "ul";
+  return (
+    <div className="mp-plan-section">
+      <strong>{title}</strong>
+      <ListTag>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ListTag>
+    </div>
   );
 }
 

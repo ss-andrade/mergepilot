@@ -112,6 +112,10 @@ export interface Plan {
   workstreamId: string;
   title: string;
   body: string;
+  goalRestatement: string;
+  steps: string[];
+  risks: string[];
+  expectedOutputs: string[];
   status: PlanStatus;
   createdAt: string;
   updatedAt: string;
@@ -119,9 +123,23 @@ export interface Plan {
 
 export interface CreatePlanInput {
   workstreamId: string;
-  title: string;
-  body: string;
+  title?: string;
+  body?: string;
+  goalRestatement?: string;
+  steps?: string[];
+  risks?: string[];
+  expectedOutputs?: string[];
   status?: PlanStatus;
+}
+
+export interface ProposePlanInput {
+  workstreamId: string;
+}
+
+export interface PlanDecisionInput {
+  workstreamId: string;
+  planId: string;
+  reason?: string;
 }
 
 export interface AgentRun {
@@ -159,6 +177,9 @@ export interface OrchestratorStore {
   appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent;
   listEvents(workstreamId: string): WorkstreamEvent[];
   createPlan(input: CreatePlanInput): Plan;
+  proposePlan(input: ProposePlanInput): Plan;
+  approvePlan(input: PlanDecisionInput): Plan;
+  rejectPlan(input: PlanDecisionInput): Plan;
   listPlans(workstreamId: string): Plan[];
   createAgentRun(input: CreateAgentRunInput): AgentRun;
   listAgentRuns(workstreamId: string): AgentRun[];

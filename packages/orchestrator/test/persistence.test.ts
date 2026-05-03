@@ -534,6 +534,9 @@ describe("SqliteOrchestratorStore", () => {
       body: "Add persistence, services, and IPC.",
       status: "draft"
     });
+    store.updateWorkstreamStatus(workstream.id, "planning");
+    const proposed = store.proposePlan({ workstreamId: workstream.id });
+    store.approvePlan({ workstreamId: workstream.id, planId: proposed.id });
     const run = store.createAgentRun({
       workstreamId: workstream.id,
       providerId: "codex",
@@ -542,8 +545,152 @@ describe("SqliteOrchestratorStore", () => {
       goal: "Implement the orchestrator foundation."
     });
 
-    expect(store.listPlans(workstream.id)).toEqual([expect.objectContaining({ id: plan.id })]);
+    expect(store.listPlans(workstream.id)).toEqual([
+      expect.objectContaining({ id: plan.id }),
+      expect.objectContaining({ id: proposed.id, status: "approved" })
+    ]);
     expect(store.listAgentRuns(workstream.id)).toEqual([expect.objectContaining({ id: run.id })]);
+    store.close();
+  });
+
+  it("proposes, approves, and rejects structured coordinator plans with timeline and status side effects", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Coordinator planning",
+      goal: "Implement a deterministic coordinator planning loop.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    store.updateWorkstreamStatus(workstream.id, "planning");
+
+    const plan = store.proposePlan({ workstreamId: workstream.id });
+
+    expect(plan).toMatchObject({
+      workstreamId: workstream.id,
+      goalRestatement: "Implement a deterministic coordinator planning loop.",
+      status: "draft"
+    });
+    expect(plan.steps).toEqual([
+      expect.stringContaining("Inspect ss-andrade/mergepilot"),
+      expect.stringContaining("Implement"),
+      expect.stringContaining("Verify")
+    ]);
+    expect(plan.risks.length).toBeGreaterThan(0);
+    expect(plan.expectedOutputs.length).toBeGreaterThan(0);
+    expect(store.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_plan_approval" });
+    expect(store.listEvents(workstream.id)).toEqual([
+      expect.objectContaining({
+        type: "plan_created",
+        message: "Coordinator plan proposed.",
+        payload: {
+          planId: plan.id,
+          status: "draft",
+          steps: plan.steps.length,
+          risks: plan.risks.length,
+          expectedOutputs: plan.expectedOutputs.length
+        }
+      })
+    ]);
+
+    const approved = store.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+
+    expect(approved).toMatchObject({ id: plan.id, status: "approved" });
+    expect(store.getWorkstream(workstream.id)).toMatchObject({ status: "running" });
+    expect(store.listEvents(workstream.id).at(-1)).toMatchObject({
+      type: "plan_approved",
+      message: "Coordinator plan approved.",
+      payload: {
+        planId: plan.id,
+        status: "approved",
+        unlocksExecution: true
+      }
+    });
+
+    const secondWorkstream = store.createWorkstream({
+      title: "Reject planning",
+      goal: "Try a plan that needs changes.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    store.updateWorkstreamStatus(secondWorkstream.id, "planning");
+    const rejectedPlan = store.proposePlan({ workstreamId: secondWorkstream.id });
+
+    expect(store.rejectPlan({
+      workstreamId: secondWorkstream.id,
+      planId: rejectedPlan.id,
+      reason: "Needs a smaller first milestone."
+    })).toMatchObject({ status: "rejected" });
+    expect(store.getWorkstream(secondWorkstream.id)).toMatchObject({ status: "planning" });
+    expect(store.listEvents(secondWorkstream.id).at(-1)).toMatchObject({
+      type: "human_action_required",
+      message: "Coordinator plan rejected.",
+      payload: {
+        planId: rejectedPlan.id,
+        status: "rejected",
+        reason: "Needs a smaller first milestone."
+      }
+    });
+    store.close();
+  });
+
+  it("prevents plan decisions and agent execution before approval unlocks execution", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Execution gate",
+      goal: "Block execution before plan approval.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+
+    expect(() => store.createAgentRun({
+      workstreamId: workstream.id,
+      providerId: "codex",
+      role: "build",
+      goal: "Should not run yet."
+    })).toThrow(/approved plan/i);
+
+    const plan = store.proposePlan({ workstreamId: workstream.id });
+    expect(() => store.createAgentRun({
+      workstreamId: workstream.id,
+      providerId: "codex",
+      role: "build",
+      goal: "Still awaiting approval."
+    })).toThrow(/approved plan/i);
+
+    store.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    expect(store.createAgentRun({
+      workstreamId: workstream.id,
+      providerId: "codex",
+      role: "build",
+      goal: "Run after approval."
+    })).toMatchObject({ status: "queued" });
+
+    const completed = store.createWorkstream({
+      title: "Terminal workstream",
+      goal: "Do not resurrect terminal workstreams.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    store.updateWorkstreamStatus(completed.id, "planning");
+    const terminalPlan = store.proposePlan({ workstreamId: completed.id });
+    store.approvePlan({ workstreamId: completed.id, planId: terminalPlan.id });
+    store.updateWorkstreamStatus(completed.id, "awaiting_review");
+    store.updateWorkstreamStatus(completed.id, "merge_ready");
+    store.updateWorkstreamStatus(completed.id, "completed");
+    expect(() => store.proposePlan({ workstreamId: completed.id })).toThrow(/completed/i);
+
+    const awaiting = store.createWorkstream({
+      title: "Awaiting decision",
+      goal: "Only decide while awaiting approval.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    const awaitingPlan = store.proposePlan({ workstreamId: awaiting.id });
+    store.updateWorkstreamStatus(awaiting.id, "cancelled");
+    expect(() => store.approvePlan({ workstreamId: awaiting.id, planId: awaitingPlan.id })).toThrow(/cancelled/i);
+    expect(() => store.rejectPlan({ workstreamId: awaiting.id, planId: awaitingPlan.id })).toThrow(/cancelled/i);
     store.close();
   });
 
@@ -563,6 +710,22 @@ describe("SqliteOrchestratorStore", () => {
       body: "Invalid status",
       status: "done" as never
     })).toThrow(/plan status/i);
+    expect(() => store.createPlan({
+      workstreamId: workstream.id,
+      goalRestatement: "",
+      steps: ["Implement"],
+      risks: ["Risk"],
+      expectedOutputs: ["Output"],
+      status: "draft"
+    })).toThrow(/goalRestatement/i);
+    expect(() => store.createPlan({
+      workstreamId: workstream.id,
+      goalRestatement: "Valid goal",
+      steps: [],
+      risks: ["Risk"],
+      expectedOutputs: ["Output"],
+      status: "draft"
+    })).toThrow(/steps/i);
     expect(() => store.createAgentRun({
       workstreamId: workstream.id,
       providerId: "codex",

@@ -8,6 +8,8 @@ import {
   LocalOrchestratorService,
   OrchestratorStatus,
   OrchestratorStore,
+  PlanDecisionInput,
+  ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
   WorkstreamStatus
 } from "./types.js";
@@ -88,6 +90,18 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
 
   createPlan(input: CreatePlanInput) {
     return this.requireStore().createPlan(input);
+  }
+
+  proposePlan(input: ProposePlanInput) {
+    return this.requireStore().proposePlan(input);
+  }
+
+  approvePlan(input: PlanDecisionInput) {
+    return this.requireStore().approvePlan(input);
+  }
+
+  rejectPlan(input: PlanDecisionInput) {
+    return this.requireStore().rejectPlan(input);
   }
 
   listPlans(workstreamId: string) {
