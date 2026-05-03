@@ -60,7 +60,16 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           return created;
         },
         list: async () => [...workstreams],
-        get: async (id) => workstreams.find((workstream) => workstream.id === id) ?? null
+        get: async (id) => workstreams.find((workstream) => workstream.id === id) ?? null,
+        updateStatus: async (id, nextStatus) => {
+          const workstream = workstreams.find((item) => item.id === id);
+          if (!workstream) {
+            throw new Error(`Missing workstream ${id}`);
+          }
+          workstream.status = nextStatus;
+          workstream.updatedAt = now;
+          return workstream;
+        }
       },
       events: {
         append: async (input) => {
@@ -95,6 +104,6 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await page.getByRole("button", { name: "Create workstream" }).click();
 
   await expect(page.getByRole("heading", { level: 2, name: "Workstream 1" })).toBeVisible();
-  await expect(page.getByText("workstream.created")).toBeVisible();
+  await expect(page.getByText("user_message")).toBeVisible();
   expect(runtimeFailures).toEqual([]);
 });

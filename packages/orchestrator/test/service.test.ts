@@ -35,7 +35,7 @@ describe("LocalOrchestratorService", () => {
     expect(orchestrator.updateWorkstreamStatus(workstream.id, "planning")).toMatchObject({ status: "planning" });
     orchestrator.appendEvent({
       workstreamId: workstream.id,
-      type: "service.ready",
+      type: "coordinator_message",
       message: "Service ready"
     });
 
@@ -53,7 +53,7 @@ describe("LocalOrchestratorService", () => {
       title: "Service workstream"
     });
     expect(orchestrator.listEvents(workstream.id)).toEqual([
-      expect.objectContaining({ type: "service.ready" })
+      expect.objectContaining({ type: "coordinator_message" })
     ]);
 
     await orchestrator.stop();

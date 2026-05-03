@@ -1,5 +1,7 @@
+import { WORKSTREAM_EVENT_TYPES, WorkstreamEventType } from "./types.js";
+
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const eventTypePattern = /^[a-z][a-z0-9.:_-]{0,127}$/;
+const eventTypes = new Set<string>(WORKSTREAM_EVENT_TYPES);
 const workstreamStatuses = new Set([
   "draft",
   "planning",
@@ -69,12 +71,12 @@ export function requireId(value: string, field = "id"): string {
   return trimmed;
 }
 
-export function requireEventType(value: string): string {
+export function requireEventType(value: string): WorkstreamEventType {
   const trimmed = requireString(value, "type", 128);
-  if (!eventTypePattern.test(trimmed)) {
+  if (!eventTypes.has(trimmed)) {
     throw new Error("type must be a valid event type.");
   }
-  return trimmed;
+  return trimmed as WorkstreamEventType;
 }
 
 export function requireWorkstreamStatus(
@@ -138,9 +140,40 @@ export function assertJsonCompatible(value: unknown): void {
     return;
   }
 
-  try {
-    JSON.stringify(value);
-  } catch {
+  if (!isJsonCompatible(value, new Set())) {
     throw new Error("payload must be JSON serializable.");
   }
+}
+
+function isJsonCompatible(value: unknown, seen: Set<object>): boolean {
+  if (value === null) {
+    return true;
+  }
+
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return true;
+    case "number":
+      return Number.isFinite(value);
+    case "object":
+      break;
+    default:
+      return false;
+  }
+
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value.every((item) => isJsonCompatible(item, seen));
+  }
+
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    return false;
+  }
+
+  return Object.values(value as Record<string, unknown>).every((item) => isJsonCompatible(item, seen));
 }

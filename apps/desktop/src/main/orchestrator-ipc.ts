@@ -2,8 +2,12 @@ import type {
   AppendWorkstreamEventInput,
   CreateWorkstreamInput,
   LocalOrchestratorService,
+  WorkstreamEventType,
   WorkstreamStatus
 } from "@mergepilot/orchestrator";
+import { WORKSTREAM_EVENT_TYPES } from "@mergepilot/orchestrator";
+
+const workstreamEventTypes = new Set<string>(WORKSTREAM_EVENT_TYPES);
 
 export interface OrchestratorIpc {
   handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
@@ -138,12 +142,12 @@ function optionalBoundedString(value: unknown, field: string, maxLength: number)
   return requireBoundedString(value, field, maxLength);
 }
 
-function requireEventType(value: unknown): string {
+function requireEventType(value: unknown): WorkstreamEventType {
   const type = requireBoundedString(value, "type", 128);
-  if (!/^[a-z][a-z0-9.:_-]{0,127}$/.test(type)) {
+  if (!workstreamEventTypes.has(type)) {
     throw new Error("type must be a valid event type.");
   }
-  return type;
+  return type as WorkstreamEventType;
 }
 
 function parseWorkstreamStatus(value: unknown): WorkstreamStatus {
@@ -168,9 +172,40 @@ function parseWorkstreamStatus(value: unknown): WorkstreamStatus {
 }
 
 function assertJsonCompatible(value: unknown): void {
-  try {
-    JSON.stringify(value);
-  } catch {
+  if (!isJsonCompatible(value, new Set())) {
     throw new Error("payload must be JSON serializable.");
   }
+}
+
+function isJsonCompatible(value: unknown, seen: Set<object>): boolean {
+  if (value === null) {
+    return true;
+  }
+
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return true;
+    case "number":
+      return Number.isFinite(value);
+    case "object":
+      break;
+    default:
+      return false;
+  }
+
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value.every((item) => isJsonCompatible(item, seen));
+  }
+
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    return false;
+  }
+
+  return Object.values(value as Record<string, unknown>).every((item) => isJsonCompatible(item, seen));
 }

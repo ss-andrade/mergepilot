@@ -200,9 +200,9 @@ export function App() {
       });
       await window.mergePilot.events.append({
         workstreamId: created.id,
-        type: "workstream.created",
+        type: "user_message",
         message: "Workstream created from renderer",
-        payload: { surface: "web" }
+        payload: { surface: "web", action: "workstream_created" }
       });
       setFormState(emptyForm);
       setNewWorkstreamOpen(false);
@@ -217,9 +217,9 @@ export function App() {
     try {
       await window.mergePilot.events.append({
         workstreamId,
-        type: "timeline.note",
+        type: "coordinator_message",
         message: "Timeline note appended from renderer",
-        payload: { surface: "web" }
+        payload: { surface: "web", action: "timeline_note" }
       });
       setTimeline({
         selectedWorkstreamId: workstreamId,

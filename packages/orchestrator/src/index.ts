@@ -21,5 +21,7 @@ export type {
   PlanStatus,
   Workstream,
   WorkstreamEvent,
+  WorkstreamEventType,
   WorkstreamStatus
 } from "./types.js";
+export { WORKSTREAM_EVENT_TYPES } from "./types.js";

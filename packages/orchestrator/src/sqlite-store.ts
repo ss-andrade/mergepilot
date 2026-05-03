@@ -11,7 +11,9 @@ import {
   OrchestratorStore,
   Plan,
   Workstream,
-  WorkstreamEvent
+  WorkstreamEvent,
+  WORKSTREAM_EVENT_TYPES,
+  WorkstreamEventType
 } from "./types.js";
 import {
   assertJsonCompatible,
@@ -60,6 +62,8 @@ type AgentRunRow = Omit<
   created_at: string;
   updated_at: string;
 };
+
+const eventTypeSqlList = WORKSTREAM_EVENT_TYPES.map((type) => `'${type}'`).join(", ");
 
 export class SqliteOrchestratorStore implements OrchestratorStore {
   readonly databasePath: string;
@@ -302,7 +306,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         id TEXT PRIMARY KEY,
         workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
         sequence INTEGER NOT NULL,
-        type TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN (${eventTypeSqlList})),
         message TEXT NOT NULL,
         payload_json TEXT,
         created_at TEXT NOT NULL,
@@ -340,6 +344,12 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       CREATE INDEX IF NOT EXISTS idx_agent_runs_workstream
         ON agent_runs(workstream_id);
     `);
+    this.ensureWorkstreamEventsSchema();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
+        ON workstream_events(workstream_id, sequence);
+    `);
+    this.createEventImmutabilityTriggers();
   }
 
   private recreateLegacyWorkstreamSchema(): void {
@@ -396,7 +406,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
           id TEXT PRIMARY KEY,
           workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
           sequence INTEGER NOT NULL,
-          type TEXT NOT NULL,
+          type TEXT NOT NULL CHECK (type IN (${eventTypeSqlList})),
           message TEXT NOT NULL,
           payload_json TEXT,
           created_at TEXT NOT NULL,
@@ -453,6 +463,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         VALUES (@id, @workstream_id, @sequence, @type, @message, @payload_json, @created_at)
       `);
       for (const row of legacyEvents) {
+        row.type = mapLegacyEventType(row.type);
         insertEvent.run(row);
       }
 
@@ -490,6 +501,67 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       return [];
     }
     return this.db.prepare(`SELECT * FROM ${tableName}`).all() as Array<Record<string, unknown>>;
+  }
+
+  private ensureWorkstreamEventsSchema(): void {
+    const table = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workstream_events'")
+      .get() as { sql: string } | undefined;
+    if (!table || table.sql.includes("CHECK (type IN")) {
+      return;
+    }
+
+    const rows = this.db.prepare("SELECT * FROM workstream_events ORDER BY workstream_id, sequence").all() as Array<
+      Record<string, unknown>
+    >;
+
+    const recreateEvents = this.db.transaction(() => {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS trg_workstream_events_no_update;
+        DROP TRIGGER IF EXISTS trg_workstream_events_no_delete;
+        DROP TABLE workstream_events;
+        CREATE TABLE workstream_events (
+          id TEXT PRIMARY KEY,
+          workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          type TEXT NOT NULL CHECK (type IN (${eventTypeSqlList})),
+          message TEXT NOT NULL,
+          payload_json TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE(workstream_id, sequence)
+        );
+      `);
+
+      const insertEvent = this.db.prepare(`
+        INSERT INTO workstream_events (id, workstream_id, sequence, type, message, payload_json, created_at)
+        VALUES (@id, @workstream_id, @sequence, @type, @message, @payload_json, @created_at)
+      `);
+
+      for (const row of rows) {
+        insertEvent.run({
+          ...row,
+          type: mapLegacyEventType(row.type)
+        });
+      }
+    });
+
+    recreateEvents();
+  }
+
+  private createEventImmutabilityTriggers(): void {
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_workstream_events_no_update
+      BEFORE UPDATE ON workstream_events
+      BEGIN
+        SELECT RAISE(ABORT, 'workstream_events are immutable');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_workstream_events_no_delete
+      BEFORE DELETE ON workstream_events
+      BEGIN
+        SELECT RAISE(ABORT, 'workstream_events are immutable');
+      END;
+    `);
   }
 }
 
@@ -571,5 +643,26 @@ function mapLegacyWorkstreamStatus(status: string | null): Workstream["status"] 
       return "running";
     default:
       return "draft";
+  }
+}
+
+function mapLegacyEventType(value: unknown): WorkstreamEventType {
+  if (typeof value === "string" && (WORKSTREAM_EVENT_TYPES as readonly string[]).includes(value)) {
+    return value as WorkstreamEventType;
+  }
+
+  switch (value) {
+    case "agent.run.started":
+      return "agent_started";
+    case "agent.run.completed":
+      return "agent_completed";
+    case "plan.created":
+      return "plan_created";
+    case "plan.approved":
+      return "plan_approved";
+    case "workstream.completed":
+      return "workstream_completed";
+    default:
+      return "user_message";
   }
 }

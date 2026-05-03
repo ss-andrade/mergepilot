@@ -112,7 +112,7 @@ describe("SqliteOrchestratorStore", () => {
     `).run();
     legacy.prepare(`
       INSERT INTO workstream_events (id, workstream_id, sequence, type, message, payload_json, created_at)
-      VALUES ('legacy-event', 'legacy-ws', 1, 'workstream.created', 'Created before migration', '{"ok":true}', '2026-05-01T00:00:01.000Z')
+      VALUES ('legacy-event', 'legacy-ws', 1, 'plan.created', 'Created before migration', '{"ok":true}', '2026-05-01T00:00:01.000Z')
     `).run();
     legacy.prepare(`
       INSERT INTO plans (id, workstream_id, title, body, status, created_at, updated_at)
@@ -135,7 +135,9 @@ describe("SqliteOrchestratorStore", () => {
       summary: "Legacy description",
       status: "running"
     });
-    expect(migrated.listEvents("legacy-ws")).toEqual([expect.objectContaining({ id: "legacy-event" })]);
+    expect(migrated.listEvents("legacy-ws")).toEqual([
+      expect.objectContaining({ id: "legacy-event", type: "plan_created", payload: { ok: true } })
+    ]);
     expect(migrated.listPlans("legacy-ws")).toEqual([expect.objectContaining({ id: "legacy-plan" })]);
     expect(migrated.listAgentRuns("legacy-ws")).toEqual([expect.objectContaining({ id: "legacy-run" })]);
     migrated.close();
@@ -212,7 +214,7 @@ describe("SqliteOrchestratorStore", () => {
     store.close();
   });
 
-  it("appends and reads ordered timeline events with structured payloads", async () => {
+  it("appends every canonical timeline event type and reads them in stable sequence order with structured payloads", async () => {
     const dataDir = await createTempDir();
     const store = createSqliteOrchestratorStore({ dataDir });
     const workstream = store.createWorkstream({
@@ -222,31 +224,165 @@ describe("SqliteOrchestratorStore", () => {
       createdBy: "hermes"
     });
 
-    const first = store.appendEvent({
-      workstreamId: workstream.id,
-      type: "workstream.created",
-      message: "Workstream created",
-      payload: { source: "test" }
-    });
-    const second = store.appendEvent({
-      workstreamId: workstream.id,
-      type: "agent.run.started",
-      message: "Agent run started"
-    });
+    const eventTypes = [
+      "user_message",
+      "coordinator_message",
+      "plan_created",
+      "plan_approved",
+      "agent_started",
+      "agent_completed",
+      "command_ran",
+      "commit_created",
+      "branch_pushed",
+      "pr_opened",
+      "ci_started",
+      "ci_passed",
+      "ci_failed",
+      "review_summary_created",
+      "human_action_required",
+      "workstream_completed"
+    ] as const;
+
+    const created = eventTypes.map((type, index) =>
+      store.appendEvent({
+        workstreamId: workstream.id,
+        type,
+        message: `Timeline event ${index + 1}`,
+        payload:
+          index === 0
+            ? {
+                source: "test",
+                command: ["npm", "test"],
+                exitCode: 0,
+                nested: { ok: true, count: 2 },
+                labels: ["timeline", "audit"],
+                optional: null
+              }
+            : undefined
+      })
+    );
 
     expect(store.listEvents(workstream.id)).toEqual([
       expect.objectContaining({
-        id: first.id,
+        id: created[0].id,
         sequence: 1,
-        payload: { source: "test" }
+        type: "user_message",
+        payload: {
+          source: "test",
+          command: ["npm", "test"],
+          exitCode: 0,
+          nested: { ok: true, count: 2 },
+          labels: ["timeline", "audit"],
+          optional: null
+        }
       }),
-      expect.objectContaining({
-        id: second.id,
-        sequence: 2,
-        payload: null
-      })
+      ...created.slice(1).map((event, index) =>
+        expect.objectContaining({
+          id: event.id,
+          sequence: index + 2,
+          type: eventTypes[index + 1],
+          payload: null
+        })
+      )
     ]);
     store.close();
+  });
+
+  it("rejects non-canonical event types at the service and SQLite boundaries", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Event type validation",
+      goal: "Reject non-canonical timeline events.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+
+    expect(() =>
+      store.appendEvent({
+        workstreamId: workstream.id,
+        type: "workstream.created" as never,
+        message: "Legacy dotted type"
+      })
+    ).toThrow(/valid event type/i);
+
+    const db = new Database(store.databasePath);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO workstream_events (id, workstream_id, sequence, type, message, payload_json, created_at)
+           VALUES ('bad-event', ?, 1, 'workstream.created', 'Bad event', NULL, '2026-05-01T00:00:00.000Z')`
+        )
+        .run(workstream.id)
+    ).toThrow();
+    db.close();
+    expect(store.listEvents(workstream.id)).toEqual([]);
+    store.close();
+  });
+
+  it("rejects payloads that cannot be faithfully represented as JSON metadata", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Metadata validation",
+      goal: "Reject lossy payload metadata.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+
+    expect(() =>
+      store.appendEvent({
+        workstreamId: workstream.id,
+        type: "command_ran",
+        message: "Invalid payload",
+        payload: { command: "npm test", elided: undefined }
+      })
+    ).toThrow(/payload/i);
+    expect(() =>
+      store.appendEvent({
+        workstreamId: workstream.id,
+        type: "command_ran",
+        message: "Invalid payload",
+        payload: { command: "npm test", metadata: () => "not JSON" }
+      })
+    ).toThrow(/payload/i);
+    store.close();
+  });
+
+  it("prevents direct mutation or deletion of persisted events", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Immutable timeline",
+      goal: "Prevent audit event tampering.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    const event = store.appendEvent({
+      workstreamId: workstream.id,
+      type: "command_ran",
+      message: "npm test",
+      payload: { command: ["npm", "test"], exitCode: 0 }
+    });
+    store.close();
+
+    const db = new Database(path.join(dataDir, "mergepilot.sqlite3"));
+    expect(() =>
+      db.prepare("UPDATE workstream_events SET message = 'tampered' WHERE id = ?").run(event.id)
+    ).toThrow(/immutable/i);
+    expect(() => db.prepare("DELETE FROM workstream_events WHERE id = ?").run(event.id)).toThrow(/immutable/i);
+    db.close();
+
+    const reopened = createSqliteOrchestratorStore({ dataDir });
+    expect(reopened.listEvents(workstream.id)).toEqual([
+      expect.objectContaining({
+        id: event.id,
+        type: "command_ran",
+        message: "npm test",
+        payload: { command: ["npm", "test"], exitCode: 0 }
+      })
+    ]);
+    reopened.close();
   });
 
   it("creates plans and agent runs linked to a workstream", async () => {
