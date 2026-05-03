@@ -565,11 +565,10 @@ Agent notices repeated workflow
 Workstream
   id
   title
-  status
   goal
+  status
+  repo
   createdBy
-  repoScope
-  coordinatorAgentId
   summary
   createdAt
   updatedAt

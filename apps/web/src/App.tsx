@@ -44,8 +44,9 @@ interface TimelineState {
 
 interface WorkstreamFormState {
   title: string;
-  description: string;
-  repositoryPath: string;
+  goal: string;
+  repo: string;
+  summary: string;
 }
 
 const fallbackSections = [
@@ -78,8 +79,9 @@ const navItems = [
 
 const emptyForm: WorkstreamFormState = {
   title: "",
-  description: "",
-  repositoryPath: ""
+  goal: "",
+  repo: "",
+  summary: ""
 };
 
 function formatDate(value: string) {
@@ -90,9 +92,10 @@ function formatDate(value: string) {
 }
 
 function getStatusTone(status: Workstream["status"]) {
-  if (status === "active") return "success";
-  if (status === "paused") return "warning";
+  if (status === "running" || status === "merge_ready") return "success";
+  if (status === "awaiting_user_input" || status === "awaiting_review" || status === "awaiting_plan_approval") return "warning";
   if (status === "completed") return "accent";
+  if (status === "failed" || status === "cancelled") return "danger";
   return "muted";
 }
 
@@ -190,8 +193,10 @@ export function App() {
       const title = input?.title.trim() || `Workstream ${workstreams.length + 1}`;
       const created = await window.mergePilot.workstreams.create({
         title,
-        description: input?.description.trim() || "Created through the secure Electron bridge.",
-        repositoryPath: input?.repositoryPath.trim() || null
+        goal: input?.goal.trim() || "Coordinate and verify a local engineering goal through MergePilot.",
+        repo: input?.repo.trim() || "local/workspace",
+        createdBy: "renderer",
+        summary: input?.summary.trim() || "Created through the secure Electron bridge."
       });
       await window.mergePilot.events.append({
         workstreamId: created.id,
@@ -377,7 +382,7 @@ export function App() {
             </Badge>
             <p>
               {selectedWorkstream
-                ? selectedWorkstream.description ?? "This workstream is ready for local timeline capture."
+                ? selectedWorkstream.summary ?? selectedWorkstream.goal
                 : "Coordinator, build agents, PR checks, and human decisions land in this desktop surface."}
             </p>
           </div>
@@ -409,8 +414,8 @@ export function App() {
                         <span>{formatDate(workstream.updatedAt)}</span>
                       </div>
                       <h4>{workstream.title}</h4>
-                      <p>{workstream.description ?? "No description"}</p>
-                      {workstream.repositoryPath ? <code>{workstream.repositoryPath}</code> : null}
+                      <p>{workstream.summary ?? workstream.goal}</p>
+                      <code>{workstream.repo}</code>
                       <div className="mp-card__footer">
                         <Button variant="outline" onClick={() => void selectWorkstream(workstream.id)}>
                           View timeline
@@ -552,7 +557,7 @@ function NewWorkstreamDialog({
       <form onSubmit={onSubmit}>
         <DialogHeader>
           <DialogTitle>New workstream</DialogTitle>
-          <DialogDescription>Describe the goal and optional repository path to start local tracking.</DialogDescription>
+          <DialogDescription>Describe the goal and repository scope to start local tracking.</DialogDescription>
         </DialogHeader>
         <DialogBody className="mp-form-grid">
           <div>
@@ -566,22 +571,31 @@ function NewWorkstreamDialog({
             />
           </div>
           <div>
-            <Label htmlFor="workstream-description">Description</Label>
+            <Label htmlFor="workstream-goal">Goal</Label>
             <Textarea
-              id="workstream-description"
-              onChange={(event) => setFormState({ ...formState, description: event.target.value })}
+              id="workstream-goal"
+              onChange={(event) => setFormState({ ...formState, goal: event.target.value })}
               placeholder="What should agents coordinate, verify, and report?"
               rows={4}
-              value={formState.description}
+              value={formState.goal}
             />
           </div>
           <div>
-            <Label htmlFor="workstream-path">Repository path</Label>
+            <Label htmlFor="workstream-repo">Repository</Label>
             <Input
-              id="workstream-path"
-              onChange={(event) => setFormState({ ...formState, repositoryPath: event.target.value })}
-              placeholder="/path/to/repo"
-              value={formState.repositoryPath}
+              id="workstream-repo"
+              onChange={(event) => setFormState({ ...formState, repo: event.target.value })}
+              placeholder="ss-andrade/mergepilot"
+              value={formState.repo}
+            />
+          </div>
+          <div>
+            <Label htmlFor="workstream-summary">Summary</Label>
+            <Input
+              id="workstream-summary"
+              onChange={(event) => setFormState({ ...formState, summary: event.target.value })}
+              placeholder="Short visible summary"
+              value={formState.summary}
             />
           </div>
         </DialogBody>

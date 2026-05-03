@@ -1,7 +1,8 @@
 import type {
   AppendWorkstreamEventInput,
   CreateWorkstreamInput,
-  LocalOrchestratorService
+  LocalOrchestratorService,
+  WorkstreamStatus
 } from "@mergepilot/orchestrator";
 
 export interface OrchestratorIpc {
@@ -22,6 +23,7 @@ export function registerOrchestratorIpcHandlers(
     | "createWorkstream"
     | "listWorkstreams"
     | "getWorkstream"
+    | "updateWorkstreamStatus"
     | "appendEvent"
     | "listEvents"
   >
@@ -49,6 +51,12 @@ export function registerOrchestratorIpcHandlers(
     return orchestrator.getWorkstream(id);
   });
 
+  ipc.handle("workstreams:update-status", (_event, rawInput) => {
+    const input = requireRecord(rawInput);
+    const id = parseIdInput(input.workstreamId, "workstreamId");
+    return orchestrator.updateWorkstreamStatus(id, parseWorkstreamStatus(input.status));
+  });
+
   ipc.handle("events:append", (_event, rawInput) => {
     return orchestrator.appendEvent(parseAppendEventInput(rawInput));
   });
@@ -62,14 +70,14 @@ export function registerOrchestratorIpcHandlers(
 function parseCreateWorkstreamInput(rawInput: unknown): CreateWorkstreamInput {
   const input = requireRecord(rawInput);
   const parsed: CreateWorkstreamInput = {
-    title: requireBoundedString(input.title, "title", 160)
+    title: requireBoundedString(input.title, "title", 160),
+    goal: requireBoundedString(input.goal, "goal", 5000),
+    repo: requireBoundedString(input.repo, "repo", 2048),
+    createdBy: requireBoundedString(input.createdBy, "createdBy", 160)
   };
 
-  if ("description" in input) {
-    parsed.description = optionalBoundedString(input.description, "description", 5000);
-  }
-  if ("repositoryPath" in input) {
-    parsed.repositoryPath = optionalBoundedString(input.repositoryPath, "repositoryPath", 2048);
+  if ("summary" in input) {
+    parsed.summary = optionalBoundedString(input.summary, "summary", 5000);
   }
 
   return parsed;
@@ -136,6 +144,27 @@ function requireEventType(value: unknown): string {
     throw new Error("type must be a valid event type.");
   }
   return type;
+}
+
+function parseWorkstreamStatus(value: unknown): WorkstreamStatus {
+  const status = requireBoundedString(value, "status", 40);
+  if (
+    ![
+      "draft",
+      "planning",
+      "awaiting_plan_approval",
+      "running",
+      "awaiting_user_input",
+      "awaiting_review",
+      "merge_ready",
+      "completed",
+      "failed",
+      "cancelled"
+    ].includes(status)
+  ) {
+    throw new Error("status must be a valid workstream status.");
+  }
+  return status as WorkstreamStatus;
 }
 
 function assertJsonCompatible(value: unknown): void {

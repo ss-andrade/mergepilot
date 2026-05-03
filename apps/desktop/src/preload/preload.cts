@@ -13,20 +13,36 @@ export interface OrchestratorStatus {
   databasePath: string;
 }
 
+export type WorkstreamStatus =
+  | "draft"
+  | "planning"
+  | "awaiting_plan_approval"
+  | "running"
+  | "awaiting_user_input"
+  | "awaiting_review"
+  | "merge_ready"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
 export interface Workstream {
   id: string;
   title: string;
-  description: string | null;
-  repositoryPath: string | null;
-  status: "active" | "paused" | "completed" | "archived";
+  goal: string;
+  status: WorkstreamStatus;
+  repo: string;
+  createdBy: string;
+  summary: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface CreateWorkstreamInput {
   title: string;
-  description?: string | null;
-  repositoryPath?: string | null;
+  goal: string;
+  repo: string;
+  createdBy: string;
+  summary?: string | null;
 }
 
 export interface WorkstreamEvent {
@@ -61,6 +77,7 @@ export interface MergePilotDesktopApi {
     create(input: CreateWorkstreamInput): Promise<Workstream>;
     list(): Promise<Workstream[]>;
     get(id: string): Promise<Workstream | null>;
+    updateStatus(id: string, status: WorkstreamStatus): Promise<Workstream>;
   };
   events: {
     append(input: AppendWorkstreamEventInput): Promise<WorkstreamEvent>;
@@ -82,7 +99,8 @@ const desktopApi: MergePilotDesktopApi = {
   workstreams: {
     create: (input) => ipcRenderer.invoke("workstreams:create", input),
     list: () => ipcRenderer.invoke("workstreams:list"),
-    get: (id) => ipcRenderer.invoke("workstreams:get", { workstreamId: id })
+    get: (id) => ipcRenderer.invoke("workstreams:get", { workstreamId: id }),
+    updateStatus: (id, status) => ipcRenderer.invoke("workstreams:update-status", { workstreamId: id, status })
   },
   events: {
     append: (input) => ipcRenderer.invoke("events:append", input),

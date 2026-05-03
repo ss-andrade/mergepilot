@@ -1,5 +1,29 @@
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const eventTypePattern = /^[a-z][a-z0-9.:_-]{0,127}$/;
+const workstreamStatuses = new Set([
+  "draft",
+  "planning",
+  "awaiting_plan_approval",
+  "running",
+  "awaiting_user_input",
+  "awaiting_review",
+  "merge_ready",
+  "completed",
+  "failed",
+  "cancelled"
+]);
+const allowedWorkstreamTransitions: Record<string, Set<string>> = {
+  draft: new Set(["planning", "cancelled"]),
+  planning: new Set(["awaiting_plan_approval", "cancelled"]),
+  awaiting_plan_approval: new Set(["running", "cancelled"]),
+  running: new Set(["awaiting_user_input", "awaiting_review", "failed", "cancelled"]),
+  awaiting_user_input: new Set(["running", "cancelled"]),
+  awaiting_review: new Set(["merge_ready", "running", "failed", "cancelled"]),
+  merge_ready: new Set(["completed", "running", "failed", "cancelled"]),
+  completed: new Set([]),
+  failed: new Set(["cancelled"]),
+  cancelled: new Set([])
+};
 const planStatuses = new Set(["draft", "approved", "rejected", "superseded"]);
 const agentRunStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 
@@ -51,6 +75,46 @@ export function requireEventType(value: string): string {
     throw new Error("type must be a valid event type.");
   }
   return trimmed;
+}
+
+export function requireWorkstreamStatus(
+  value: unknown
+):
+  | "draft"
+  | "planning"
+  | "awaiting_plan_approval"
+  | "running"
+  | "awaiting_user_input"
+  | "awaiting_review"
+  | "merge_ready"
+  | "completed"
+  | "failed"
+  | "cancelled" {
+  const status = requireString(value as string, "status", 40);
+  if (!workstreamStatuses.has(status)) {
+    throw new Error("status must be a valid workstream status.");
+  }
+  return status as
+    | "draft"
+    | "planning"
+    | "awaiting_plan_approval"
+    | "running"
+    | "awaiting_user_input"
+    | "awaiting_review"
+    | "merge_ready"
+    | "completed"
+    | "failed"
+    | "cancelled";
+}
+
+export function assertWorkstreamStatusTransition(currentStatus: string, nextStatus: string): void {
+  if (currentStatus === nextStatus) {
+    return;
+  }
+
+  if (!allowedWorkstreamTransitions[currentStatus]?.has(nextStatus)) {
+    throw new Error(`Invalid workstream status transition from ${currentStatus} to ${nextStatus}.`);
+  }
 }
 
 export function requirePlanStatus(value: unknown): "draft" | "approved" | "rejected" | "superseded" {

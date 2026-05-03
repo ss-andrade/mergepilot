@@ -26,14 +26,32 @@ describe("LocalOrchestratorService", () => {
     await orchestrator.start();
     expect(orchestrator.status()).toMatchObject({ state: "running", dataDir });
 
-    const workstream = orchestrator.createWorkstream({ title: "Service workstream" });
+    const workstream = orchestrator.createWorkstream({
+      title: "Service workstream",
+      goal: "Exercise service behavior.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    expect(orchestrator.updateWorkstreamStatus(workstream.id, "planning")).toMatchObject({ status: "planning" });
     orchestrator.appendEvent({
       workstreamId: workstream.id,
       type: "service.ready",
       message: "Service ready"
     });
 
-    expect(orchestrator.listWorkstreams()).toEqual([expect.objectContaining({ id: workstream.id })]);
+    expect(orchestrator.listWorkstreams()).toEqual([
+      expect.objectContaining({
+        id: workstream.id,
+        goal: "Exercise service behavior.",
+        repo: "ss-andrade/mergepilot",
+        createdBy: "hermes",
+        status: "planning"
+      })
+    ]);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({
+      id: workstream.id,
+      title: "Service workstream"
+    });
     expect(orchestrator.listEvents(workstream.id)).toEqual([
       expect.objectContaining({ type: "service.ready" })
     ]);

@@ -1,4 +1,14 @@
-export type WorkstreamStatus = "active" | "paused" | "completed" | "archived";
+export type WorkstreamStatus =
+  | "draft"
+  | "planning"
+  | "awaiting_plan_approval"
+  | "running"
+  | "awaiting_user_input"
+  | "awaiting_review"
+  | "merge_ready"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export type PlanStatus = "draft" | "approved" | "rejected" | "superseded";
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type OrchestratorState = "stopped" | "running";
@@ -6,17 +16,21 @@ export type OrchestratorState = "stopped" | "running";
 export interface Workstream {
   id: string;
   title: string;
-  description: string | null;
-  repositoryPath: string | null;
+  goal: string;
   status: WorkstreamStatus;
+  repo: string;
+  createdBy: string;
+  summary: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface CreateWorkstreamInput {
   title: string;
-  description?: string | null;
-  repositoryPath?: string | null;
+  goal: string;
+  repo: string;
+  createdBy: string;
+  summary?: string | null;
 }
 
 export interface WorkstreamEvent {
@@ -80,6 +94,7 @@ export interface OrchestratorStore {
   createWorkstream(input: CreateWorkstreamInput): Workstream;
   listWorkstreams(): Workstream[];
   getWorkstream(id: string): Workstream | null;
+  updateWorkstreamStatus(id: string, nextStatus: WorkstreamStatus): Workstream;
   appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent;
   listEvents(workstreamId: string): WorkstreamEvent[];
   createPlan(input: CreatePlanInput): Plan;
