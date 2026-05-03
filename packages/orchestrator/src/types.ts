@@ -13,6 +13,7 @@ export type WorkstreamStatus =
   | "cancelled";
 export type PlanStatus = "draft" | "approved" | "rejected" | "superseded";
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type PullRequestStatus = "open" | "failed";
 export type OrchestratorState = "stopped" | "running";
 export const WORKSTREAM_EVENT_TYPES = [
   "user_message",
@@ -144,6 +145,61 @@ export interface PlanDecisionInput {
   reason?: string;
 }
 
+export interface PullRequest {
+  id: string;
+  workstreamId: string;
+  agentRunId: string;
+  branchName: string;
+  commitSha: string;
+  prNumber: number | null;
+  prUrl: string | null;
+  title: string;
+  body: string;
+  status: PullRequestStatus;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreatePullRequestInput {
+  id?: string;
+  workstreamId: string;
+  agentRunId: string;
+  branchName: string;
+  commitSha: string;
+  prNumber?: number | null;
+  prUrl?: string | null;
+  title: string;
+  body: string;
+  status?: PullRequestStatus;
+  errorMessage?: string | null;
+}
+
+export interface OpenPullRequestInput {
+  workstreamId: string;
+  agentRunId: string;
+  title?: string;
+  body?: string;
+}
+
+export interface PullRequestPublisherInput {
+  workstream: Workstream;
+  agentRun: AgentRun;
+  title: string;
+  body: string;
+}
+
+export interface PullRequestPublisherResult {
+  branchName: string;
+  commitSha: string;
+  prNumber: number;
+  prUrl: string;
+}
+
+export interface PullRequestPublisher {
+  openPullRequest(input: PullRequestPublisherInput): Promise<PullRequestPublisherResult>;
+}
+
 export interface AgentRun {
   id: string;
   workstreamId: string;
@@ -191,6 +247,7 @@ export interface StartBuildAgentRunInput {
 
 export interface BuildAgentRunnerOptions {
   buildAgentAdapter?: AgentAdapter;
+  pullRequestPublisher?: PullRequestPublisher;
 }
 
 export interface OrchestratorStore {
@@ -213,6 +270,10 @@ export interface OrchestratorStore {
   createAgentRun(input: CreateAgentRunInput): AgentRun;
   updateAgentRun(input: UpdateAgentRunInput): AgentRun;
   listAgentRuns(workstreamId: string): AgentRun[];
+  createPullRequest(input: CreatePullRequestInput): PullRequest;
+  recordPublishedPullRequest(input: CreatePullRequestInput): PullRequest;
+  recordFailedPullRequest(input: CreatePullRequestInput): PullRequest;
+  listPullRequests(workstreamId: string): PullRequest[];
   close(): void;
 }
 
@@ -222,9 +283,10 @@ export interface OrchestratorStatus {
   databasePath: string;
 }
 
-export interface LocalOrchestratorService extends Omit<OrchestratorStore, "close"> {
+export interface LocalOrchestratorService extends Omit<OrchestratorStore, "close" | "recordPublishedPullRequest" | "recordFailedPullRequest"> {
   start(): Promise<void>;
   stop(): Promise<void>;
   status(): OrchestratorStatus;
   startBuildAgentRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
+  openPullRequest(input: OpenPullRequestInput): Promise<PullRequest>;
 }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { createLocalOrchestrator } from "@mergepilot/orchestrator";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,30 @@ import { registerOrchestratorIpcHandlers } from "./orchestrator-ipc.js";
 const rendererDevServerUrl = process.env.VITE_DEV_SERVER_URL;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const userDataDirOverride = process.env.MERGEPILOT_USER_DATA_DIR;
+
+function isExternalHttpUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function installNavigationGuards(window: BrowserWindow): void {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternalHttpUrl(url)) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, url) => {
+    if (isExternalHttpUrl(url)) {
+      event.preventDefault();
+      void shell.openExternal(url);
+    }
+  });
+}
 
 if (userDataDirOverride) {
   app.setPath("userData", userDataDirOverride);
@@ -39,6 +63,8 @@ async function createMainWindow(): Promise<void> {
       sandbox: true
     }
   });
+
+  installNavigationGuards(mainWindow);
 
   if (rendererDevServerUrl) {
     await mainWindow.loadURL(rendererDevServerUrl);
@@ -73,8 +99,22 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("before-quit", () => {
-  void orchestrator.stop();
+let quittingAfterOrchestratorStop = false;
+
+app.on("before-quit", (event) => {
+  if (quittingAfterOrchestratorStop) {
+    return;
+  }
+  event.preventDefault();
+  void (async () => {
+    try {
+      await orchestrator.stop();
+      quittingAfterOrchestratorStop = true;
+      app.quit();
+    } catch (error) {
+      console.error("MergePilot quit blocked while orchestrator lifecycle operations are active.", error);
+    }
+  })();
 });
 
 app.on("window-all-closed", () => {

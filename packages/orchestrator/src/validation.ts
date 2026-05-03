@@ -20,7 +20,7 @@ const allowedWorkstreamTransitions: Record<string, Set<string>> = {
   awaiting_plan_approval: new Set(["planning", "running", "cancelled"]),
   running: new Set(["awaiting_user_input", "awaiting_review", "failed", "cancelled"]),
   awaiting_user_input: new Set(["running", "cancelled"]),
-  awaiting_review: new Set(["merge_ready", "running", "failed", "cancelled"]),
+  awaiting_review: new Set(["merge_ready", "awaiting_user_input", "running", "failed", "cancelled"]),
   merge_ready: new Set(["completed", "running", "failed", "cancelled"]),
   completed: new Set([]),
   failed: new Set(["cancelled"]),
