@@ -47,6 +47,11 @@ interface PlanState {
   plans: Plan[];
 }
 
+interface AgentRunState {
+  selectedWorkstreamId: string | null;
+  runs: AgentRun[];
+}
+
 interface WorkstreamFormState {
   title: string;
   goal: string;
@@ -138,6 +143,7 @@ export function App() {
   const [repositories, setRepositories] = useState<GitHubRepositoryConnection[]>([]);
   const [timeline, setTimeline] = useState<TimelineState>({ selectedWorkstreamId: null, events: [] });
   const [planState, setPlanState] = useState<PlanState>({ selectedWorkstreamId: null, plans: [] });
+  const [agentRunState, setAgentRunState] = useState<AgentRunState>({ selectedWorkstreamId: null, runs: [] });
   const [error, setError] = useState<string | null>(null);
   const [humanAttentionMessage, setHumanAttentionMessage] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
@@ -187,6 +193,7 @@ export function App() {
       setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
       setPlanState({ selectedWorkstreamId: null, plans: [] });
+      setAgentRunState({ selectedWorkstreamId: null, runs: [] });
       return;
     }
 
@@ -199,14 +206,19 @@ export function App() {
     const selected = preferredWorkstreamId ?? timeline.selectedWorkstreamId ?? nextWorkstreams[0]?.id ?? null;
     const selectedExists = selected ? nextWorkstreams.some((workstream) => workstream.id === selected) : false;
     const nextSelected = selectedExists ? selected : nextWorkstreams[0]?.id ?? null;
-    const [nextEvents, nextPlans] = nextSelected
-      ? await Promise.all([window.mergePilot.events.list(nextSelected), window.mergePilot.plans.list(nextSelected)])
-      : [[], []];
+    const [nextEvents, nextPlans, nextAgentRuns] = nextSelected
+      ? await Promise.all([
+          window.mergePilot.events.list(nextSelected),
+          window.mergePilot.plans.list(nextSelected),
+          window.mergePilot.agents.listRuns(nextSelected)
+        ])
+      : [[], [], []];
     setTimeline({
       selectedWorkstreamId: nextSelected,
       events: nextEvents
     });
     setPlanState({ selectedWorkstreamId: nextSelected, plans: nextPlans });
+    setAgentRunState({ selectedWorkstreamId: nextSelected, runs: nextAgentRuns });
   }
 
   async function startOrchestrator() {
@@ -228,6 +240,7 @@ export function App() {
       setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
       setPlanState({ selectedWorkstreamId: null, plans: [] });
+      setAgentRunState({ selectedWorkstreamId: null, runs: [] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to stop orchestrator.");
     }
@@ -293,12 +306,14 @@ export function App() {
   }
 
   async function selectWorkstream(workstreamId: string) {
-    const [events, plans] = await Promise.all([
+    const [events, plans, runs] = await Promise.all([
       window.mergePilot.events.list(workstreamId),
-      window.mergePilot.plans.list(workstreamId)
+      window.mergePilot.plans.list(workstreamId),
+      window.mergePilot.agents.listRuns(workstreamId)
     ]);
     setTimeline({ selectedWorkstreamId: workstreamId, events });
     setPlanState({ selectedWorkstreamId: workstreamId, plans });
+    setAgentRunState({ selectedWorkstreamId: workstreamId, runs });
     setSidebarOpen(false);
   }
 
@@ -334,6 +349,17 @@ export function App() {
       await refreshOrchestrator(plan.workstreamId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to reject coordinator plan.");
+    }
+  }
+
+  async function startBuildAgentRun(workstreamId: string) {
+    setError(null);
+    try {
+      const run = await window.mergePilot.agents.startBuildRun({ workstreamId });
+      setHumanAttentionMessage(run.status === "completed" ? "Build agent finished and the workstream is ready for review." : `Build agent ${run.status}.`);
+      await refreshOrchestrator(workstreamId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to start build agent run.");
     }
   }
 
@@ -748,6 +774,41 @@ export function App() {
                   <SparklesIcon aria-hidden="true" />
                   <strong>No coordinator plan yet</strong>
                   <p>Generate a plan to restate the goal, list steps, identify risks, and define expected outputs before execution.</p>
+                </div>
+              )}
+            </Panel>
+
+            <Panel className="mp-agent-runs" role="region" aria-label="Agent runs">
+              <div className="mp-section-heading">
+                <div>
+                  <p className="mp-eyebrow">Build-agent execution loop</p>
+                  <h3>Agent runs</h3>
+                </div>
+                {selectedWorkstream?.status === "running" ? (
+                  <Button variant="secondary" onClick={() => void startBuildAgentRun(selectedWorkstream.id)}>
+                    <BotIcon aria-hidden="true" />
+                    Start build agent
+                  </Button>
+                ) : null}
+              </div>
+              {agentRunState.runs.length > 0 ? (
+                <div className="mp-agent-run-list">
+                  {agentRunState.runs.map((run) => (
+                    <div className="mp-agent-run-row" key={run.id}>
+                      <div>
+                        <strong>{run.role} agent</strong>
+                        <p>{run.summary ?? run.goal}</p>
+                        {run.workspacePath ? <code>{run.workspacePath}</code> : null}
+                      </div>
+                      <Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "warning"}>{run.status}</Badge>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mp-empty-state">
+                  <BotIcon aria-hidden="true" />
+                  <strong>No build-agent runs yet</strong>
+                  <p>Approve a coordinator plan, then start a scoped build-agent run to capture command output, summary, and diff evidence.</p>
                 </div>
               )}
             </Panel>

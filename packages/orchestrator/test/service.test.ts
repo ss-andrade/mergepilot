@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLocalOrchestrator } from "../src/index.js";
 
 const tempDirs: string[] = [];
@@ -120,6 +120,227 @@ describe("LocalOrchestratorService", () => {
       type: "plan_approved",
       payload: expect.objectContaining({ planId: plan.id, unlocksExecution: true })
     });
+
+    await orchestrator.stop();
+  });
+
+  it("starts a scoped build-agent run from an approved plan and records runtime evidence", async () => {
+    const dataDir = await createTempDir();
+    const adapterRun = vi.fn(async (input) => ({
+      runId: input.runId,
+      providerId: "fake-agent",
+      adapterId: "fake-build",
+      events: (async function* () {
+        yield {
+          type: "lifecycle" as const,
+          status: "started" as const,
+          runId: input.runId,
+          providerId: "fake-agent",
+          timestamp: "2026-05-02T00:00:01.000Z",
+          message: "Fake build agent started."
+        };
+        yield {
+          type: "command" as const,
+          runId: input.runId,
+          providerId: "fake-agent",
+          timestamp: "2026-05-02T00:00:02.000Z",
+          command: "npm test -- --runInBand",
+          cwd: input.workspacePath
+        };
+        yield {
+          type: "artifact" as const,
+          artifactType: "diff" as const,
+          runId: input.runId,
+          providerId: "fake-agent",
+          timestamp: "2026-05-02T00:00:03.000Z",
+          content: "diff --git a/app.ts b/app.ts"
+        };
+      })(),
+      result: Promise.resolve({
+        runId: input.runId,
+        providerId: "fake-agent",
+        adapterId: "fake-build",
+        status: "completed" as const,
+        summary: "Implemented the approved build task and tests passed.",
+        startedAt: "2026-05-02T00:00:01.000Z",
+        completedAt: "2026-05-02T00:00:04.000Z",
+        artifacts: [
+          {
+            type: "artifact" as const,
+            artifactType: "summary" as const,
+            runId: input.runId,
+            providerId: "fake-agent",
+            timestamp: "2026-05-02T00:00:04.000Z",
+            content: "Implemented the approved build task and tests passed."
+          }
+        ]
+      }),
+      cancel: async () => undefined
+    }));
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      buildAgentAdapter: {
+        metadata: {
+          providerId: "fake-agent",
+          adapterId: "fake-build",
+          displayName: "Fake Build Agent",
+          capabilities: {
+            streamingEvents: true,
+            cancellation: true,
+            structuredResults: true,
+            sessionResume: false
+          }
+        },
+        detect: async () => ({ providerId: "fake-agent", status: "available", checkedAt: "2026-05-02T00:00:00.000Z" }),
+        health: async () => ({ providerId: "fake-agent", status: "healthy", checkedAt: "2026-05-02T00:00:00.000Z" }),
+        run: adapterRun
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Build loop",
+      goal: "Run a deterministic build task.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+
+    expect(run).toMatchObject({
+      workstreamId: workstream.id,
+      planId: plan.id,
+      providerId: "fake-agent",
+      adapterId: "fake-build",
+      role: "build",
+      status: "completed",
+      summary: "Implemented the approved build task and tests passed.",
+      workspacePath: expect.stringContaining(path.join(dataDir, "workspaces", workstream.id))
+    });
+    expect(adapterRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: run.id,
+        workstreamId: workstream.id,
+        role: "build",
+        goal: "Run a deterministic build task.",
+        workspacePath: run.workspacePath,
+        repoPath: "ss-andrade/mergepilot",
+        branchName: expect.stringContaining(`mergepilot/${workstream.id}/build/`),
+        instructions: expect.stringContaining(plan.goalRestatement),
+        metadata: expect.objectContaining({ planId: plan.id })
+      })
+    );
+    expect(orchestrator.listAgentRuns(workstream.id)).toEqual([expect.objectContaining({ id: run.id, status: "completed" })]);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({
+      status: "awaiting_review",
+      summary: "Implemented the approved build task and tests passed."
+    });
+    expect(orchestrator.listEvents(workstream.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "agent_started", payload: expect.objectContaining({ runId: run.id, workspacePath: run.workspacePath }) }),
+        expect.objectContaining({ type: "command_ran", payload: expect.objectContaining({ runId: run.id, command: "npm test -- --runInBand", exitCode: null }) }),
+        expect.objectContaining({ type: "agent_completed", payload: expect.objectContaining({ runId: run.id, summary: run.summary, diff: expect.any(String) }) })
+      ])
+    );
+
+    await orchestrator.stop();
+  });
+
+  it("keeps active build-agent runs lifecycle-safe until they settle", async () => {
+    const dataDir = await createTempDir();
+    let releaseRun!: () => void;
+    let adapterStarted!: () => void;
+    const adapterStartedPromise = new Promise<void>((resolve) => {
+      adapterStarted = resolve;
+    });
+    const releaseRunPromise = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      buildAgentAdapter: {
+        metadata: {
+          providerId: "slow-agent",
+          adapterId: "slow-build",
+          displayName: "Slow Build Agent",
+          capabilities: {
+            streamingEvents: true,
+            cancellation: false,
+            structuredResults: true,
+            sessionResume: false
+          }
+        },
+        detect: async () => ({ providerId: "slow-agent", status: "available", checkedAt: "2026-05-02T00:00:00.000Z" }),
+        health: async () => ({ providerId: "slow-agent", status: "healthy", checkedAt: "2026-05-02T00:00:00.000Z" }),
+        run: async (input) => {
+          adapterStarted();
+          return {
+            runId: input.runId,
+            providerId: "slow-agent",
+            adapterId: "slow-build",
+            events: (async function* () {
+              yield {
+                type: "command" as const,
+                runId: input.runId,
+                providerId: "slow-agent",
+                timestamp: "2026-05-02T00:00:01.000Z",
+                command: "npm test",
+                cwd: input.workspacePath,
+                exitCode: 0
+              };
+              await releaseRunPromise;
+            })(),
+            result: releaseRunPromise.then(() => ({
+              runId: input.runId,
+              providerId: "slow-agent",
+              adapterId: "slow-build",
+              status: "completed" as const,
+              summary: "Slow build finished.",
+              startedAt: "2026-05-02T00:00:01.000Z",
+              completedAt: "2026-05-02T00:00:02.000Z"
+            })),
+            cancel: async () => undefined
+          };
+        }
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Slow build loop",
+      goal: "Exercise active-run lifecycle safety.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+
+    const runPromise = orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    await adapterStartedPromise;
+
+    await expect(orchestrator.stop()).rejects.toThrow(/active/i);
+    await expect(orchestrator.startBuildAgentRun({ workstreamId: workstream.id })).rejects.toThrow(/already active/i);
+
+    releaseRun();
+    await expect(runPromise).resolves.toMatchObject({ status: "completed", summary: "Slow build finished." });
+    await expect(orchestrator.stop()).resolves.toBeUndefined();
+  });
+
+  it("does not start a build-agent run before plan approval", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({ dataDir });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Blocked build loop",
+      goal: "Require approval before execution.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+
+    await expect(orchestrator.startBuildAgentRun({ workstreamId: workstream.id })).rejects.toThrow(/approved plan/i);
+    expect(orchestrator.listAgentRuns(workstream.id)).toEqual([]);
 
     await orchestrator.stop();
   });

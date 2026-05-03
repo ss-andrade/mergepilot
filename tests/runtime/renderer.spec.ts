@@ -14,6 +14,7 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
     let running = false;
     let sequence = 0;
     const createCalls: CreateWorkstreamInput[] = [];
+    const agentRuns: AgentRun[] = [];
     const plans: Plan[] = [
       {
         id: "plan-seeded",
@@ -289,6 +290,67 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           sequence += 1;
           return plan;
         }
+      },
+      agents: {
+        startBuildRun: async ({ workstreamId }) => {
+          const workstream = workstreams.find((item) => item.id === workstreamId);
+          const plan = plans.find((item) => item.workstreamId === workstreamId && item.status === "approved");
+          if (!workstream || !plan) {
+            throw new Error("An approved plan is required before agent execution can start.");
+          }
+          const run: AgentRun = {
+            id: `run-${agentRuns.length + 1}`,
+            workstreamId,
+            planId: plan.id,
+            providerId: "mock-agent",
+            adapterId: "mock-build",
+            role: "build",
+            status: "completed",
+            goal: workstream.goal,
+            workspacePath: `/tmp/mergepilot-renderer-mock/workspaces/${workstreamId}/run-${agentRuns.length + 1}`,
+            branchName: `mergepilot/${workstreamId}/build/run-${agentRuns.length + 1}`,
+            summary: "Mock build agent completed the approved task.",
+            startedAt: now,
+            completedAt: now,
+            createdAt: now,
+            updatedAt: now
+          };
+          agentRuns.push(run);
+          workstream.status = "awaiting_review";
+          workstream.summary = run.summary;
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "agent_started",
+            message: "Build agent run started.",
+            payload: { runId: run.id, workspacePath: run.workspacePath },
+            createdAt: now
+          });
+          sequence += 1;
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "command_ran",
+            message: "Build agent ran npm test.",
+            payload: { runId: run.id, command: "npm test", exitCode: 0 },
+            createdAt: now
+          });
+          sequence += 1;
+          events.push({
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "agent_completed",
+            message: "Build agent run completed.",
+            payload: { runId: run.id, summary: run.summary, diff: "diff --git a/app.tsx b/app.tsx" },
+            createdAt: now
+          });
+          sequence += 1;
+          return run;
+        },
+        listRuns: async (workstreamId) => agentRuns.filter((run) => run.workstreamId === workstreamId)
       }
     };
   });
@@ -317,6 +379,13 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("approved");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("plan_approved");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("running");
+  await page.getByRole("button", { name: "Start build agent" }).click();
+  await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("completed");
+  await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("Mock build agent completed the approved task.");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("agent_started");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("command_ran");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("agent_completed");
+  await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("awaiting_review");
   await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Plan approvals, blockers, and access requests");
 
   await page.getByRole("button", { name: /^Review dependency update awaiting_review$/ }).click();
@@ -353,16 +422,18 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   });
 
   await page.getByRole("button", { name: "Connect GitHub repo" }).click();
-  await page.getByLabel("Owner").fill("openai");
-  await page.getByLabel("Repository name").fill("codex");
-  await page.getByLabel("Default branch").fill("main");
+  await expect(page.getByRole("dialog", { name: "Connect GitHub repository" })).toBeVisible();
+  await page.locator("#github-owner").fill("openai");
+  await page.locator("#github-name").fill("codex");
+  await page.locator("#github-default-branch").fill("main");
   await page.getByRole("button", { name: "Connect repository" }).click();
   await expect(page.getByRole("region", { name: "GitHub repositories" })).toContainText("openai/codex");
 
   await page.getByRole("button", { name: "Connect GitHub repo" }).click();
-  await page.getByLabel("Owner").fill("missing");
-  await page.getByLabel("Repository name").fill("private-repo");
-  await page.getByLabel("Default branch").fill("main");
+  await expect(page.getByRole("dialog", { name: "Connect GitHub repository" })).toBeVisible();
+  await page.locator("#github-owner").fill("missing");
+  await page.locator("#github-name").fill("private-repo");
+  await page.locator("#github-default-branch").fill("main");
   await page.getByRole("button", { name: "Connect repository" }).click();
   await expect(page.getByRole("alert")).toContainText("Repository not found or inaccessible.");
   await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Repository not found or inaccessible.");

@@ -15,6 +15,7 @@ import {
   Plan,
   ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
+  UpdateAgentRunInput,
   Workstream,
   WorkstreamEvent,
   WorkstreamGitHubRepositoryScope,
@@ -67,11 +68,23 @@ type PlanRow = Omit<Plan, "workstreamId" | "createdAt" | "updatedAt"> & {
 
 type AgentRunRow = Omit<
   AgentRun,
-  "workstreamId" | "providerId" | "adapterId" | "startedAt" | "completedAt" | "createdAt" | "updatedAt"
+  | "workstreamId"
+  | "planId"
+  | "providerId"
+  | "adapterId"
+  | "workspacePath"
+  | "branchName"
+  | "startedAt"
+  | "completedAt"
+  | "createdAt"
+  | "updatedAt"
 > & {
   workstream_id: string;
+  plan_id: string | null;
   provider_id: string;
   adapter_id: string | null;
+  workspace_path: string | null;
+  branch_name: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
@@ -169,6 +182,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     return {
       ...current,
       status,
+      updatedAt
+    };
+  }
+
+  updateWorkstreamSummary(id: string, summary: string | null): Workstream {
+    const workstreamId = requireId(id);
+    const current = this.getWorkstream(workstreamId);
+    if (!current) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+    const normalized = normalizeOptionalString(summary, 5000);
+    const updatedAt = new Date().toISOString();
+    this.db.prepare("UPDATE workstreams SET summary = ?, updated_at = ? WHERE id = ?").run(normalized, updatedAt, workstreamId);
+    return {
+      ...current,
+      summary: normalized,
       updatedAt
     };
   }
@@ -409,6 +438,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
   createAgentRun(input: CreateAgentRunInput): AgentRun {
     const workstreamId = requireId(input.workstreamId, "workstreamId");
+    const planId = input.planId === undefined || input.planId === null ? null : requireId(input.planId, "planId");
     const status = input.status ? requireAgentRunStatus(input.status) : "queued";
     const workstream = this.getWorkstream(workstreamId);
     if (!workstream) {
@@ -417,15 +447,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     if (workstream.status !== "running" || !this.hasApprovedPlan(workstreamId)) {
       throw new Error("An approved plan is required before agent execution can start.");
     }
+    if (planId !== null && !this.isApprovedPlanForWorkstream(workstreamId, planId)) {
+      throw new Error("Agent runs must reference an approved plan for the same workstream.");
+    }
     const now = new Date().toISOString();
     const run: AgentRun = {
-      id: randomUUID(),
+      id: input.id === undefined ? randomUUID() : requireId(input.id, "agentRunId"),
       workstreamId,
+      planId,
       providerId: requireString(input.providerId, "providerId", 80),
       adapterId: normalizeOptionalString(input.adapterId, 120),
       role: requireString(input.role, "role", 80),
       status,
       goal: requireString(input.goal, "goal", 5000),
+      workspacePath: normalizeOptionalString(input.workspacePath, 2048),
+      branchName: normalizeOptionalString(input.branchName, 250),
+      summary: normalizeOptionalString(input.summary, 5000),
       startedAt: null,
       completedAt: null,
       createdAt: now,
@@ -435,16 +472,43 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     this.db
       .prepare(
         `INSERT INTO agent_runs (
-           id, workstream_id, provider_id, adapter_id, role, status, goal,
-           started_at, completed_at, created_at, updated_at
+           id, workstream_id, plan_id, provider_id, adapter_id, role, status, goal,
+           workspace_path, branch_name, summary, started_at, completed_at, created_at, updated_at
          )
          VALUES (
-           @id, @workstreamId, @providerId, @adapterId, @role, @status, @goal,
-           @startedAt, @completedAt, @createdAt, @updatedAt
+           @id, @workstreamId, @planId, @providerId, @adapterId, @role, @status, @goal,
+           @workspacePath, @branchName, @summary, @startedAt, @completedAt, @createdAt, @updatedAt
          )`
       )
       .run(run);
     return run;
+  }
+
+  updateAgentRun(input: UpdateAgentRunInput): AgentRun {
+    const id = requireId(input.id, "agentRunId");
+    const row = this.db.prepare("SELECT * FROM agent_runs WHERE id = ?").get(id) as AgentRunRow | undefined;
+    if (!row) {
+      throw new Error(`Agent run ${id} was not found.`);
+    }
+    const current = mapAgentRunRow(row);
+    const updatedAt = new Date().toISOString();
+    const next: AgentRun = {
+      ...current,
+      status: input.status === undefined ? current.status : requireAgentRunStatus(input.status),
+      startedAt: input.startedAt === undefined ? current.startedAt : input.startedAt,
+      completedAt: input.completedAt === undefined ? current.completedAt : input.completedAt,
+      summary: input.summary === undefined ? current.summary : normalizeOptionalString(input.summary, 5000),
+      updatedAt
+    };
+
+    this.db
+      .prepare(
+        `UPDATE agent_runs
+         SET status = @status, started_at = @startedAt, completed_at = @completedAt, summary = @summary, updated_at = @updatedAt
+         WHERE id = @id`
+      )
+      .run(next);
+    return next;
   }
 
   listAgentRuns(workstreamId: string): AgentRun[] {
@@ -529,6 +593,13 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     const row = this.db
       .prepare("SELECT 1 FROM plans WHERE workstream_id = ? AND status = 'approved' LIMIT 1")
       .get(workstreamId);
+    return row !== undefined;
+  }
+
+  private isApprovedPlanForWorkstream(workstreamId: string, planId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM plans WHERE id = ? AND workstream_id = ? AND status = 'approved' LIMIT 1")
+      .get(planId, workstreamId);
     return row !== undefined;
   }
 
@@ -634,11 +705,15 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
         workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+        plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
         provider_id TEXT NOT NULL,
         adapter_id TEXT,
         role TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
         goal TEXT NOT NULL,
+        workspace_path TEXT,
+        branch_name TEXT,
+        summary TEXT,
         started_at TEXT,
         completed_at TEXT,
         created_at TEXT NOT NULL,
@@ -670,6 +745,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     this.ensureWorkstreamsGitHubRepositorySchema();
     this.ensureWorkstreamEventsSchema();
     this.ensurePlansSchema();
+    this.ensureAgentRunsSchema();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
         ON workstream_events(workstream_id, sequence);
@@ -756,11 +832,15 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         CREATE TABLE agent_runs (
           id TEXT PRIMARY KEY,
           workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
           provider_id TEXT NOT NULL,
           adapter_id TEXT,
           role TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
           goal TEXT NOT NULL,
+          workspace_path TEXT,
+          branch_name TEXT,
+          summary TEXT,
           started_at TEXT,
           completed_at TEXT,
           created_at TEXT NOT NULL,
@@ -811,13 +891,17 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
       const insertAgentRun = this.db.prepare(`
         INSERT INTO agent_runs (
-          id, workstream_id, provider_id, adapter_id, role, status, goal, started_at, completed_at, created_at, updated_at
+          id, workstream_id, plan_id, provider_id, adapter_id, role, status, goal, workspace_path, branch_name, summary, started_at, completed_at, created_at, updated_at
         )
         VALUES (
-          @id, @workstream_id, @provider_id, @adapter_id, @role, @status, @goal, @started_at, @completed_at, @created_at, @updated_at
+          @id, @workstream_id, @plan_id, @provider_id, @adapter_id, @role, @status, @goal, @workspace_path, @branch_name, @summary, @started_at, @completed_at, @created_at, @updated_at
         )
       `);
       for (const row of legacyAgentRuns) {
+        row.plan_id = row.plan_id ?? null;
+        row.workspace_path = row.workspace_path ?? null;
+        row.branch_name = row.branch_name ?? null;
+        row.summary = row.summary ?? null;
         insertAgentRun.run(row);
       }
     });
@@ -897,6 +981,22 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       ["steps_json", "ALTER TABLE plans ADD COLUMN steps_json TEXT;"],
       ["risks_json", "ALTER TABLE plans ADD COLUMN risks_json TEXT;"],
       ["expected_outputs_json", "ALTER TABLE plans ADD COLUMN expected_outputs_json TEXT;"]
+    ] as const;
+    for (const [column, statement] of statements) {
+      if (!columnNames.has(column)) {
+        this.db.exec(statement);
+      }
+    }
+  }
+
+  private ensureAgentRunsSchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(agent_runs)").all() as Array<{ name: string }>;
+    const columnNames = new Set(columns.map((column) => column.name));
+    const statements = [
+      ["plan_id", "ALTER TABLE agent_runs ADD COLUMN plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL;"],
+      ["workspace_path", "ALTER TABLE agent_runs ADD COLUMN workspace_path TEXT;"],
+      ["branch_name", "ALTER TABLE agent_runs ADD COLUMN branch_name TEXT;"],
+      ["summary", "ALTER TABLE agent_runs ADD COLUMN summary TEXT;"]
     ] as const;
     for (const [column, statement] of statements) {
       if (!columnNames.has(column)) {
@@ -1118,11 +1218,15 @@ function mapAgentRunRow(row: AgentRunRow): AgentRun {
   return {
     id: row.id,
     workstreamId: row.workstream_id,
+    planId: row.plan_id,
     providerId: row.provider_id,
     adapterId: row.adapter_id,
     role: row.role,
     status: row.status,
     goal: row.goal,
+    workspacePath: row.workspace_path,
+    branchName: row.branch_name,
+    summary: row.summary,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     createdAt: row.created_at,
