@@ -1,3 +1,5 @@
+import type { AgentAdapter } from "@mergepilot/agents";
+
 export type WorkstreamStatus =
   | "draft"
   | "planning"
@@ -145,11 +147,15 @@ export interface PlanDecisionInput {
 export interface AgentRun {
   id: string;
   workstreamId: string;
+  planId: string | null;
   providerId: string;
   adapterId: string | null;
   role: string;
   status: AgentRunStatus;
   goal: string;
+  workspacePath: string | null;
+  branchName: string | null;
+  summary: string | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -157,12 +163,34 @@ export interface AgentRun {
 }
 
 export interface CreateAgentRunInput {
+  id?: string;
   workstreamId: string;
+  planId?: string | null;
   providerId: string;
   adapterId?: string | null;
   role: string;
   status?: AgentRunStatus;
   goal: string;
+  workspacePath?: string | null;
+  branchName?: string | null;
+  summary?: string | null;
+}
+
+export interface UpdateAgentRunInput {
+  id: string;
+  status?: AgentRunStatus;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  summary?: string | null;
+}
+
+export interface StartBuildAgentRunInput {
+  workstreamId: string;
+  planId?: string;
+}
+
+export interface BuildAgentRunnerOptions {
+  buildAgentAdapter?: AgentAdapter;
 }
 
 export interface OrchestratorStore {
@@ -170,6 +198,7 @@ export interface OrchestratorStore {
   listWorkstreams(): Workstream[];
   getWorkstream(id: string): Workstream | null;
   updateWorkstreamStatus(id: string, nextStatus: WorkstreamStatus): Workstream;
+  updateWorkstreamSummary(id: string, summary: string | null): Workstream;
   connectGitHubRepository(input: ConnectGitHubRepositoryInput): GitHubRepositoryConnection;
   listGitHubRepositories(): GitHubRepositoryConnection[];
   selectGitHubRepository(id: string): GitHubRepositoryConnection;
@@ -182,6 +211,7 @@ export interface OrchestratorStore {
   rejectPlan(input: PlanDecisionInput): Plan;
   listPlans(workstreamId: string): Plan[];
   createAgentRun(input: CreateAgentRunInput): AgentRun;
+  updateAgentRun(input: UpdateAgentRunInput): AgentRun;
   listAgentRuns(workstreamId: string): AgentRun[];
   close(): void;
 }
@@ -196,4 +226,5 @@ export interface LocalOrchestratorService extends Omit<OrchestratorStore, "close
   start(): Promise<void>;
   stop(): Promise<void>;
   status(): OrchestratorStatus;
+  startBuildAgentRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
 }

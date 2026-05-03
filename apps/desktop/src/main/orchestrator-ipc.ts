@@ -6,6 +6,7 @@ import type {
   PlanDecisionInput,
   ProposePlanInput,
   ReportGitHubRepositoryConnectionErrorInput,
+  StartBuildAgentRunInput,
   WorkstreamGitHubRepositoryScope,
   WorkstreamEventType,
   WorkstreamStatus
@@ -41,6 +42,8 @@ export function registerOrchestratorIpcHandlers(
     | "listPlans"
     | "approvePlan"
     | "rejectPlan"
+    | "startBuildAgentRun"
+    | "listAgentRuns"
     | "appendEvent"
     | "listEvents"
   >
@@ -102,6 +105,14 @@ export function registerOrchestratorIpcHandlers(
 
   ipc.handle("plans:reject", (_event, rawInput) => {
     return orchestrator.rejectPlan(parsePlanDecisionInput(rawInput));
+  });
+
+  ipc.handle("agents:start-build-run", (_event, rawInput) => {
+    return orchestrator.startBuildAgentRun(parseStartBuildAgentRunInput(rawInput));
+  });
+
+  ipc.handle("agents:list-runs", (_event, rawInput) => {
+    return orchestrator.listAgentRuns(parseIdInput(rawInput, "workstreamId"));
   });
 
   ipc.handle("events:append", (_event, rawInput) => {
@@ -195,6 +206,17 @@ function parsePlanDecisionInput(rawInput: unknown): PlanDecisionInput {
   };
   if ("reason" in input && input.reason !== undefined && input.reason !== null) {
     parsed.reason = requireBoundedString(input.reason, "reason", 2000);
+  }
+  return parsed;
+}
+
+function parseStartBuildAgentRunInput(rawInput: unknown): StartBuildAgentRunInput {
+  const input = requireRecord(rawInput);
+  const parsed: StartBuildAgentRunInput = {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId")
+  };
+  if ("planId" in input && input.planId !== undefined && input.planId !== null) {
+    parsed.planId = parseIdInput(input.planId, "planId");
   }
   return parsed;
 }

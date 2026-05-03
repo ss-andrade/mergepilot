@@ -141,7 +141,25 @@ describe("orchestrator IPC handlers", () => {
         status: "rejected" as const,
         createdAt: "2026-05-01T00:06:00.000Z",
         updatedAt: "2026-05-01T00:08:00.000Z"
-      }))
+      })),
+      startBuildAgentRun: vi.fn(() => ({
+        id: "run-1",
+        workstreamId: "ws-1",
+        planId: "plan-1",
+        providerId: "fake-agent",
+        adapterId: "fake-build",
+        role: "build",
+        status: "completed" as const,
+        goal: "Exercise IPC planning.",
+        workspacePath: "/tmp/workspaces/ws-1/run-1",
+        branchName: "mergepilot/ws-1/build/run-1",
+        summary: "Build agent finished.",
+        startedAt: "2026-05-01T00:09:00.000Z",
+        completedAt: "2026-05-01T00:10:00.000Z",
+        createdAt: "2026-05-01T00:09:00.000Z",
+        updatedAt: "2026-05-01T00:10:00.000Z"
+      })),
+      listAgentRuns: vi.fn(() => [])
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -199,6 +217,11 @@ describe("orchestrator IPC handlers", () => {
     await expect(
       ipc.invoke("plans:reject", { workstreamId: "ws-1", planId: "plan-1", reason: "Needs edits." })
     ).resolves.toMatchObject({ id: "plan-1", status: "rejected" });
+    await expect(ipc.invoke("agents:start-build-run", { workstreamId: "ws-1" })).resolves.toMatchObject({
+      id: "run-1",
+      status: "completed",
+      summary: "Build agent finished."
+    });
 
     expect(orchestrator.createWorkstream).toHaveBeenCalledWith({
       title: "IPC work",
@@ -235,6 +258,7 @@ describe("orchestrator IPC handlers", () => {
       planId: "plan-1",
       reason: "Needs edits."
     });
+    expect(orchestrator.startBuildAgentRun).toHaveBeenCalledWith({ workstreamId: "ws-1" });
   });
 
   it("validates IPC input before calling services", async () => {
@@ -257,7 +281,8 @@ describe("orchestrator IPC handlers", () => {
       proposePlan: vi.fn(),
       listPlans: vi.fn(),
       approvePlan: vi.fn(),
-      rejectPlan: vi.fn()
+      rejectPlan: vi.fn(),
+      startBuildAgentRun: vi.fn()
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -288,6 +313,7 @@ describe("orchestrator IPC handlers", () => {
     await expect(ipc.invoke("plans:propose", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
     await expect(ipc.invoke("plans:approve", { workstreamId: "ws-1", planId: "../bad" })).rejects.toThrow(/planId/i);
     await expect(ipc.invoke("plans:reject", { workstreamId: "ws-1", planId: "plan-1", reason: "" })).rejects.toThrow(/reason/i);
+    await expect(ipc.invoke("agents:start-build-run", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
     expect(orchestrator.createWorkstream).not.toHaveBeenCalled();
     expect(orchestrator.updateWorkstreamStatus).not.toHaveBeenCalled();
     expect(orchestrator.appendEvent).not.toHaveBeenCalled();
@@ -297,5 +323,6 @@ describe("orchestrator IPC handlers", () => {
     expect(orchestrator.proposePlan).not.toHaveBeenCalled();
     expect(orchestrator.approvePlan).not.toHaveBeenCalled();
     expect(orchestrator.rejectPlan).not.toHaveBeenCalled();
+    expect(orchestrator.startBuildAgentRun).not.toHaveBeenCalled();
   });
 });

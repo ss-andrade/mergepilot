@@ -141,6 +141,29 @@ interface PlanDecisionInput {
   reason?: string;
 }
 
+interface AgentRun {
+  id: string;
+  workstreamId: string;
+  planId: string | null;
+  providerId: string;
+  adapterId: string | null;
+  role: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  goal: string;
+  workspacePath: string | null;
+  branchName: string | null;
+  summary: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface StartBuildAgentRunInput {
+  workstreamId: string;
+  planId?: string;
+}
+
 export interface MergePilotDesktopApi {
   readonly appInfo: {
     readonly name: "MergePilot";
@@ -175,6 +198,10 @@ export interface MergePilotDesktopApi {
     list(workstreamId: string): Promise<Plan[]>;
     approve(input: PlanDecisionInput): Promise<Plan>;
     reject(input: PlanDecisionInput): Promise<Plan>;
+  };
+  agents: {
+    startBuildRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
+    listRuns(workstreamId: string): Promise<AgentRun[]>;
   };
 }
 
@@ -212,6 +239,10 @@ const desktopApi: MergePilotDesktopApi = {
     list: (workstreamId) => ipcRenderer.invoke("plans:list", { workstreamId }),
     approve: (input) => ipcRenderer.invoke("plans:approve", input),
     reject: (input) => ipcRenderer.invoke("plans:reject", input)
+  },
+  agents: {
+    startBuildRun: (input) => ipcRenderer.invoke("agents:start-build-run", input),
+    listRuns: (workstreamId) => ipcRenderer.invoke("agents:list-runs", { workstreamId })
   }
 };
 
