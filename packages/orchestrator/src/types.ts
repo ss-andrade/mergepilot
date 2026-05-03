@@ -14,6 +14,9 @@ export type WorkstreamStatus =
 export type PlanStatus = "draft" | "approved" | "rejected" | "superseded";
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type PullRequestStatus = "open" | "failed";
+export type PullRequestChecksStatus = "unknown" | "pending" | "passed" | "failed";
+export type PullRequestReviewStatus = "not_started" | "ready" | "changes_requested" | "blocked";
+export type PullRequestHumanAction = "review" | "merge" | "answer_question" | "fix_access";
 export type OrchestratorState = "stopped" | "running";
 export const WORKSTREAM_EVENT_TYPES = [
   "user_message",
@@ -157,6 +160,14 @@ export interface PullRequest {
   body: string;
   status: PullRequestStatus;
   errorMessage: string | null;
+  checksStatus: PullRequestChecksStatus;
+  reviewStatus: PullRequestReviewStatus;
+  changedFiles: string[];
+  testCommands: string[];
+  ciSummary: string | null;
+  riskSummary: string | null;
+  reviewSummary: string | null;
+  humanAction: PullRequestHumanAction | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -174,6 +185,33 @@ export interface CreatePullRequestInput {
   status?: PullRequestStatus;
   errorMessage?: string | null;
 }
+
+export interface PullRequestReviewResult {
+  checksStatus: PullRequestChecksStatus;
+  reviewStatus: PullRequestReviewStatus;
+  changedFiles: string[];
+  testCommands: string[];
+  ciSummary: string | null;
+  riskSummary: string | null;
+  reviewSummary: string | null;
+  humanAction: PullRequestHumanAction;
+}
+
+export interface SyncPullRequestReviewInput {
+  workstreamId: string;
+  pullRequestId: string;
+}
+
+export interface PullRequestReviewProviderInput {
+  workstream: Workstream;
+  pullRequest: PullRequest;
+}
+
+export interface PullRequestReviewProvider {
+  syncPullRequestReview(input: PullRequestReviewProviderInput): Promise<PullRequestReviewResult>;
+}
+
+export interface RecordPullRequestReviewInput extends SyncPullRequestReviewInput, PullRequestReviewResult {}
 
 export interface OpenPullRequestInput {
   workstreamId: string;
@@ -248,6 +286,7 @@ export interface StartBuildAgentRunInput {
 export interface BuildAgentRunnerOptions {
   buildAgentAdapter?: AgentAdapter;
   pullRequestPublisher?: PullRequestPublisher;
+  pullRequestReviewProvider?: PullRequestReviewProvider;
 }
 
 export interface OrchestratorStore {
@@ -274,6 +313,7 @@ export interface OrchestratorStore {
   recordPublishedPullRequest(input: CreatePullRequestInput): PullRequest;
   recordFailedPullRequest(input: CreatePullRequestInput): PullRequest;
   listPullRequests(workstreamId: string): PullRequest[];
+  recordPullRequestReview(input: RecordPullRequestReviewInput): PullRequest;
   close(): void;
 }
 
@@ -289,4 +329,5 @@ export interface LocalOrchestratorService extends Omit<OrchestratorStore, "close
   status(): OrchestratorStatus;
   startBuildAgentRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
   openPullRequest(input: OpenPullRequestInput): Promise<PullRequest>;
+  syncPullRequestReview(input: SyncPullRequestReviewInput): Promise<PullRequest>;
 }

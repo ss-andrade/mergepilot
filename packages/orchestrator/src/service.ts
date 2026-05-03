@@ -1,5 +1,7 @@
 import path from "node:path";
 import { mkdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentRunArtifactEvent as AdapterRunArtifactEvent,
@@ -25,13 +27,19 @@ import {
   PlanDecisionInput,
   ProposePlanInput,
   PullRequest,
+  PullRequestHumanAction,
   PullRequestPublisher,
+  PullRequestReviewProvider,
+  PullRequestReviewResult,
+  RecordPullRequestReviewInput,
   ReportGitHubRepositoryConnectionErrorInput,
   StartBuildAgentRunInput,
   UpdateAgentRunInput,
   WorkstreamStatus
 } from "./types.js";
 import { createSqliteOrchestratorStore } from "./sqlite-store.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface LocalOrchestratorOptions extends BuildAgentRunnerOptions {
   dataDir: string;
@@ -42,6 +50,7 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
   private readonly databasePath: string;
   private readonly buildAgentAdapter: AgentAdapter;
   private readonly pullRequestPublisher: PullRequestPublisher;
+  private readonly pullRequestReviewProvider: PullRequestReviewProvider;
   private readonly activeBuildWorkstreamIds = new Set<string>();
   private readonly activePullRequestRunIds = new Set<string>();
 
@@ -49,6 +58,7 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
     this.databasePath = path.join(options.dataDir, "mergepilot.sqlite3");
     this.buildAgentAdapter = options.buildAgentAdapter ?? new DeterministicBuildAgentAdapter();
     this.pullRequestPublisher = options.pullRequestPublisher ?? new DeterministicPullRequestPublisher();
+    this.pullRequestReviewProvider = options.pullRequestReviewProvider ?? new GitHubCliPullRequestReviewProvider();
   }
 
   async start(): Promise<void> {
@@ -157,6 +167,32 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
 
   listPullRequests(workstreamId: string) {
     return this.requireStore().listPullRequests(workstreamId);
+  }
+
+  recordPullRequestReview(input: RecordPullRequestReviewInput) {
+    return this.requireStore().recordPullRequestReview(input);
+  }
+
+  async syncPullRequestReview(input: { workstreamId: string; pullRequestId: string }): Promise<PullRequest> {
+    const store = this.requireStore();
+    const workstream = store.getWorkstream(input.workstreamId);
+    if (!workstream) {
+      throw new Error(`Workstream ${input.workstreamId} was not found.`);
+    }
+    const pullRequest = store.listPullRequests(workstream.id).find((candidate) => candidate.id === input.pullRequestId);
+    if (!pullRequest) {
+      throw new Error(`Pull request ${input.pullRequestId} was not found for workstream ${workstream.id}.`);
+    }
+    if (pullRequest.status !== "open") {
+      throw new Error("Only open pull requests can sync checks and review summaries.");
+    }
+
+    const review = await this.pullRequestReviewProvider.syncPullRequestReview({ workstream, pullRequest });
+    return store.recordPullRequestReview({
+      workstreamId: workstream.id,
+      pullRequestId: pullRequest.id,
+      ...review
+    });
   }
 
   async openPullRequest(input: OpenPullRequestInput): Promise<PullRequest> {
@@ -477,6 +513,118 @@ function deterministicPullRequestNumber(workstreamId: string, agentRunId: string
     hash = (hash * 31 + char.charCodeAt(0)) % 9000;
   }
   return hash + 1000;
+}
+
+class GitHubCliPullRequestReviewProvider implements PullRequestReviewProvider {
+  async syncPullRequestReview(input: Parameters<PullRequestReviewProvider["syncPullRequestReview"]>[0]) {
+    const repo = repositorySlug(input.workstream.repo);
+    if (!repo || input.pullRequest.prNumber === null) {
+      return blockedReview("fix_access", "Missing repository or PR number; connect GitHub access before syncing checks.");
+    }
+
+    try {
+      const { stdout } = await execFileAsync("gh", [
+        "pr",
+        "view",
+        String(input.pullRequest.prNumber),
+        "--repo",
+        repo,
+        "--json",
+        "files,statusCheckRollup,reviewDecision,mergeStateStatus,title,url"
+      ], { timeout: 30000, maxBuffer: 1024 * 1024 });
+      const data = JSON.parse(stdout) as {
+        files?: Array<{ path?: string }>;
+        statusCheckRollup?: Array<Record<string, unknown>>;
+        reviewDecision?: string;
+        mergeStateStatus?: string;
+        title?: string;
+      };
+      return deriveGitHubPullRequestReviewResult(data, input.pullRequest.branchName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return blockedReview("fix_access", `Unable to sync PR checks through GitHub CLI: ${message}`);
+    }
+  }
+}
+
+export function deriveGitHubPullRequestReviewResult(data: {
+  files?: Array<{ path?: string }>;
+  statusCheckRollup?: Array<Record<string, unknown>>;
+  reviewDecision?: string;
+  mergeStateStatus?: string;
+}, fallbackChangedFile: string): PullRequestReviewResult {
+  const changedFiles = (data.files ?? []).map((file) => file.path).filter((file): file is string => Boolean(file));
+  const checks = data.statusCheckRollup ?? [];
+  const checksStatus = deriveChecksStatus(checks);
+  const reviewDecision = data.reviewDecision ?? "";
+  const mergeStateStatus = data.mergeStateStatus ?? "UNKNOWN";
+  const mergeStateReady = ["CLEAN", "HAS_HOOKS"].includes(mergeStateStatus);
+  const reviewStatus = reviewDecision === "CHANGES_REQUESTED"
+    ? "changes_requested"
+    : checksStatus === "failed" || (checksStatus === "passed" && !mergeStateReady)
+      ? "blocked"
+      : checksStatus === "passed"
+        ? "ready"
+        : "not_started";
+  const humanAction = checksStatus === "passed" && reviewStatus === "ready" && mergeStateReady ? "merge" : "review";
+  const ciSummary = summarizeChecks(checksStatus, checks);
+  const mergeSummary = mergeStateReady
+    ? `GitHub merge state is ${mergeStateStatus}.`
+    : `GitHub merge state is ${mergeStateStatus}; resolve branch protection, conflicts, draft status, or required review before merging.`;
+  return {
+    checksStatus,
+    reviewStatus,
+    changedFiles: changedFiles.length > 0 ? changedFiles : [fallbackChangedFile],
+    testCommands: extractTestCommands(checks),
+    ciSummary,
+    riskSummary: checksStatus === "passed" && mergeStateReady
+      ? "No blocking CI or merge-state risk detected from synced PR checks."
+      : `PR is not merge-ready until checks and merge state are resolved. ${mergeSummary}`,
+    reviewSummary: `${ciSummary} ${mergeSummary} ${changedFiles.length} changed file${changedFiles.length === 1 ? "" : "s"} synced for human review.`,
+    humanAction
+  };
+}
+
+function repositorySlug(repo: string): string | null {
+  const match = repo.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+function deriveChecksStatus(checks: Array<Record<string, unknown>>): "unknown" | "pending" | "passed" | "failed" {
+  if (checks.length === 0) return "unknown";
+  if (checks.some((check) => ["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"].includes(String(check.conclusion ?? check.state ?? "")))) {
+    return "failed";
+  }
+  if (checks.some((check) => ["PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING", "EXPECTED"].includes(String(check.status ?? check.state ?? "")))) {
+    return "pending";
+  }
+  return "passed";
+}
+
+function summarizeChecks(status: "unknown" | "pending" | "passed" | "failed", checks: Array<Record<string, unknown>>): string {
+  const count = checks.length;
+  if (status === "passed") return `CI passed (${count} check${count === 1 ? "" : "s"}).`;
+  if (status === "failed") return `CI failed (${count} check${count === 1 ? "" : "s"}).`;
+  if (status === "pending") return `CI is still pending (${count} check${count === 1 ? "" : "s"}).`;
+  return "No CI checks were reported for this pull request.";
+}
+
+function extractTestCommands(checks: Array<Record<string, unknown>>): string[] {
+  const names = checks.map((check) => String(check.name ?? check.context ?? "").trim()).filter(Boolean);
+  return names.length > 0 ? names.slice(0, 20) : ["GitHub PR checks sync"];
+}
+
+function blockedReview(humanAction: "review" | "fix_access" | "answer_question", message: string) {
+  return {
+    checksStatus: "unknown" as const,
+    reviewStatus: "blocked" as const,
+    changedFiles: ["PR metadata unavailable"],
+    testCommands: ["GitHub PR checks sync"],
+    ciSummary: message,
+    riskSummary: "Merge readiness could not be verified.",
+    reviewSummary: message,
+    humanAction
+  };
 }
 
 class DeterministicBuildAgentAdapter implements AgentAdapter {

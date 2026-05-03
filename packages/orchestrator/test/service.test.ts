@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLocalOrchestrator } from "../src/index.js";
+import { deriveGitHubPullRequestReviewResult } from "../src/service.js";
 
 const tempDirs: string[] = [];
 
@@ -17,6 +18,22 @@ afterEach(async () => {
 });
 
 describe("LocalOrchestratorService", () => {
+  it("does not mark blocked GitHub merge states as ready", () => {
+    const result = deriveGitHubPullRequestReviewResult({
+      files: [{ path: "src/app.ts" }],
+      statusCheckRollup: [{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS" }],
+      reviewDecision: "APPROVED",
+      mergeStateStatus: "BLOCKED"
+    }, "mergepilot/ws/build/run");
+
+    expect(result).toMatchObject({
+      checksStatus: "passed",
+      reviewStatus: "blocked",
+      humanAction: "review"
+    });
+    expect(result.riskSummary).toContain("BLOCKED");
+  });
+
   it("starts, reports status, serves workstreams and stops", async () => {
     const dataDir = await createTempDir();
     const orchestrator = createLocalOrchestrator({ dataDir });
@@ -258,7 +275,19 @@ describe("LocalOrchestratorService", () => {
         prUrl: "https://github.com/ss-andrade/mergepilot/pull/42"
       }))
     };
-    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    const pullRequestReviewProvider = {
+      syncPullRequestReview: vi.fn(async () => ({
+        checksStatus: "passed" as const,
+        reviewStatus: "ready" as const,
+        changedFiles: ["src/app.ts"],
+        testCommands: ["npm test"],
+        ciSummary: "CI passed",
+        riskSummary: "Low risk",
+        reviewSummary: "CI passed and the PR is ready for merge.",
+        humanAction: "merge" as const
+      }))
+    };
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher, pullRequestReviewProvider });
     await orchestrator.start();
     const workstream = orchestrator.createWorkstream({
       title: "Branch and PR",
@@ -290,7 +319,7 @@ describe("LocalOrchestratorService", () => {
       status: "open"
     });
     expect(orchestrator.listPullRequests(workstream.id)).toEqual([expect.objectContaining({ id: pullRequest.id })]);
-    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_review" });
     expect(orchestrator.listEvents(workstream.id)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "commit_created", payload: expect.objectContaining({ commitSha: "abc123def456" }) }),
@@ -301,6 +330,277 @@ describe("LocalOrchestratorService", () => {
 
     await expect(orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id })).resolves.toMatchObject({ id: pullRequest.id });
     expect(pullRequestPublisher.openPullRequest).toHaveBeenCalledTimes(1);
+
+    const reviewed = await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+
+    expect(reviewed).toMatchObject({
+      id: pullRequest.id,
+      checksStatus: "passed",
+      reviewStatus: "ready",
+      humanAction: "merge"
+    });
+    expect(reviewed.changedFiles).toContain("src/app.ts");
+    expect(reviewed.testCommands).toContain("npm test");
+    expect(reviewed.reviewSummary).toContain("CI passed");
+    expect(reviewed.riskSummary).toContain("Low risk");
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+    expect(orchestrator.listEvents(workstream.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "ci_passed", payload: expect.objectContaining({ checksStatus: "passed" }) }),
+        expect.objectContaining({ type: "review_summary_created", payload: expect.objectContaining({ humanAction: "merge" }) }),
+        expect.objectContaining({ type: "human_action_required", message: "Review complete; ready for merge." })
+      ])
+    );
+
+    expect(pullRequestReviewProvider.syncPullRequestReview).toHaveBeenCalledWith({
+      workstream: expect.objectContaining({ id: workstream.id }),
+      pullRequest: expect.objectContaining({ id: pullRequest.id })
+    });
+
+    await orchestrator.stop();
+  });
+
+  it("rejects inconsistent merge-ready review sync results", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestReviewProvider: {
+        syncPullRequestReview: vi.fn(async () => ({
+          checksStatus: "failed" as const,
+          reviewStatus: "blocked" as const,
+          changedFiles: ["src/app.ts"],
+          testCommands: ["npm test"],
+          ciSummary: "CI failed",
+          riskSummary: "Blocking failures remain.",
+          reviewSummary: "CI failed and cannot merge.",
+          humanAction: "merge" as const
+        }))
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Bad review", goal: "Reject invalid review state.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    await expect(orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id })).rejects.toThrow(/passed checks/i);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_review" });
+
+    await orchestrator.stop();
+  });
+
+  it("rejects stale pull request syncs from terminal workstream states", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestReviewProvider: {
+        syncPullRequestReview: vi.fn(async () => ({
+          checksStatus: "passed" as const,
+          reviewStatus: "ready" as const,
+          changedFiles: ["src/app.ts"],
+          testCommands: ["npm test"],
+          ciSummary: "CI passed",
+          riskSummary: "Low risk",
+          reviewSummary: "Ready to merge",
+          humanAction: "merge" as const
+        }))
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Terminal PR", goal: "Do not reopen completed workstreams.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    orchestrator.updateWorkstreamStatus(workstream.id, "completed");
+
+    await expect(orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id })).rejects.toThrow(/Invalid workstream status transition/i);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "completed" });
+
+    await orchestrator.stop();
+  });
+
+  it("rejects review resyncs that would regress merge-ready workstreams", async () => {
+    const dataDir = await createTempDir();
+    let ready = true;
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestReviewProvider: {
+        syncPullRequestReview: vi.fn(async () => ready
+          ? ({
+              checksStatus: "passed" as const,
+              reviewStatus: "ready" as const,
+              changedFiles: ["src/app.ts"],
+              testCommands: ["npm test"],
+              ciSummary: "CI passed",
+              riskSummary: "Low risk",
+              reviewSummary: "Ready to merge",
+              humanAction: "merge" as const
+            })
+          : ({
+              checksStatus: "failed" as const,
+              reviewStatus: "blocked" as const,
+              changedFiles: ["src/app.ts"],
+              testCommands: ["npm test"],
+              ciSummary: "CI failed",
+              riskSummary: "Blocking failures remain.",
+              reviewSummary: "Not ready",
+              humanAction: "review" as const
+            }))
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Merge-ready PR", goal: "Do not regress status from stale sync.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+    ready = false;
+
+    await expect(orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id })).rejects.toThrow(/Invalid workstream status transition/i);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+
+    await orchestrator.stop();
+  });
+
+  it("moves blocked review sync results to awaiting user input", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestReviewProvider: {
+        syncPullRequestReview: vi.fn(async () => ({
+          checksStatus: "unknown" as const,
+          reviewStatus: "blocked" as const,
+          changedFiles: ["PR metadata unavailable"],
+          testCommands: ["GitHub PR checks sync"],
+          ciSummary: "Unable to sync PR checks through GitHub CLI.",
+          riskSummary: "Merge readiness could not be verified.",
+          reviewSummary: "Unable to sync PR checks through GitHub CLI.",
+          humanAction: "fix_access" as const
+        }))
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Blocked review", goal: "Surface access failures.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    const reviewed = await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+
+    expect(reviewed).toMatchObject({ checksStatus: "unknown", reviewStatus: "blocked", humanAction: "fix_access" });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
+
+    await orchestrator.stop();
+  });
+
+  it("allows pull request review sync to recover after human action", async () => {
+    const dataDir = await createTempDir();
+    let mode: "blocked" | "pending" | "ready" = "blocked";
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestReviewProvider: {
+        syncPullRequestReview: vi.fn(async () => {
+          if (mode === "blocked") {
+            return {
+              checksStatus: "unknown" as const,
+              reviewStatus: "blocked" as const,
+              changedFiles: ["PR metadata unavailable"],
+              testCommands: ["GitHub PR checks sync"],
+              ciSummary: "Unable to sync PR checks through GitHub CLI.",
+              riskSummary: "Merge readiness could not be verified.",
+              reviewSummary: "Unable to sync PR checks through GitHub CLI.",
+              humanAction: "fix_access" as const
+            };
+          }
+          if (mode === "pending") {
+            return {
+              checksStatus: "pending" as const,
+              reviewStatus: "not_started" as const,
+              changedFiles: ["src/app.ts"],
+              testCommands: ["npm test"],
+              ciSummary: "CI pending",
+              riskSummary: "Checks are still running.",
+              reviewSummary: "CI is still pending.",
+              humanAction: "review" as const
+            };
+          }
+          return {
+            checksStatus: "passed" as const,
+            reviewStatus: "ready" as const,
+            changedFiles: ["src/app.ts"],
+            testCommands: ["npm test"],
+            ciSummary: "CI passed",
+            riskSummary: "Low risk",
+            reviewSummary: "Ready to merge",
+            humanAction: "merge" as const
+          };
+        })
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Recover review", goal: "Recover after fixing human action.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
+    mode = "pending";
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_review" });
+    mode = "blocked";
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
+    mode = "ready";
+    await orchestrator.syncPullRequestReview({ workstreamId: workstream.id, pullRequestId: pullRequest.id });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "merge_ready" });
+
+    await orchestrator.stop();
+  });
+
+  it("rejects review records for failed pull request publications", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      pullRequestPublisher: {
+        openPullRequest: vi.fn(async () => {
+          throw new Error("GitHub access denied");
+        })
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({ title: "Failed PR", goal: "Do not review failed PR records.", repo: "ss-andrade/mergepilot", createdBy: "hermes" });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+    const failedPullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(() => orchestrator.recordPullRequestReview({
+      workstreamId: workstream.id,
+      pullRequestId: failedPullRequest.id,
+      checksStatus: "passed",
+      reviewStatus: "ready",
+      changedFiles: ["src/app.ts"],
+      testCommands: ["npm test"],
+      ciSummary: "CI passed",
+      riskSummary: "Low risk",
+      reviewSummary: "Ready",
+      humanAction: "merge"
+    })).toThrow(/open pull request/i);
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
 
     await orchestrator.stop();
   });

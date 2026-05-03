@@ -174,6 +174,14 @@ interface PullRequest {
   body: string;
   status: "open" | "failed";
   errorMessage: string | null;
+  checksStatus: "unknown" | "pending" | "passed" | "failed";
+  reviewStatus: "not_started" | "ready" | "changes_requested" | "blocked";
+  changedFiles: string[];
+  testCommands: string[];
+  ciSummary: string | null;
+  riskSummary: string | null;
+  reviewSummary: string | null;
+  humanAction: "review" | "merge" | "answer_question" | "fix_access" | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -183,6 +191,11 @@ interface OpenPullRequestInput {
   agentRunId: string;
   title?: string;
   body?: string;
+}
+
+interface SyncPullRequestReviewInput {
+  workstreamId: string;
+  pullRequestId: string;
 }
 
 interface MergePilotDesktopApi {
@@ -227,6 +240,7 @@ interface MergePilotDesktopApi {
   pullRequests: {
     open(input: OpenPullRequestInput): Promise<PullRequest>;
     list(workstreamId: string): Promise<PullRequest[]>;
+    syncReview(input: SyncPullRequestReviewInput): Promise<PullRequest>;
   };
 }
 
