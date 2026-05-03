@@ -11,7 +11,7 @@
     "dev": "npm run dev -w @mergepilot/desktop",
     "dev:desktop": "npm run dev -w @mergepilot/desktop",
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run build -w @mergepilot/agents && npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:renderer": "npm run test:e2e:web",
     "test:e2e:web": "playwright test -c playwright.renderer.config.ts",

@@ -84,12 +84,14 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
 
   await expect(page.getByRole("heading", { name: "MergePilot app shell" })).toBeVisible();
   await expect(page.getByText("Electron mocked")).toBeVisible();
-  await expect(page.getByText("stopped")).toBeVisible();
+  await expect(page.getByText("stopped", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "New Workstream" }).click();
+  await page.getByLabel("Title").fill("Workstream 1");
+  await page.getByLabel("Description").fill("Created through the secure Electron bridge.");
+  await page.getByRole("button", { name: "Create workstream" }).click();
 
-  await expect(page.getByText("1 persisted workstream(s)")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Workstream 1" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name: "Workstream 1" })).toBeVisible();
   await expect(page.getByText("workstream.created")).toBeVisible();
   expect(runtimeFailures).toEqual([]);
 });
