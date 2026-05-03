@@ -6,7 +6,8 @@ import {
   CreateWorkstreamInput,
   LocalOrchestratorService,
   OrchestratorStatus,
-  OrchestratorStore
+  OrchestratorStore,
+  WorkstreamStatus
 } from "./types.js";
 import { createSqliteOrchestratorStore } from "./sqlite-store.js";
 
@@ -53,6 +54,10 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
 
   getWorkstream(id: string) {
     return this.requireStore().getWorkstream(id);
+  }
+
+  updateWorkstreamStatus(id: string, nextStatus: WorkstreamStatus) {
+    return this.requireStore().updateWorkstreamStatus(id, nextStatus);
   }
 
   appendEvent(input: AppendWorkstreamEventInput) {

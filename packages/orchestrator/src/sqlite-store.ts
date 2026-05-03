@@ -20,7 +20,9 @@ import {
   requireEventType,
   requireId,
   requirePlanStatus,
-  requireString
+  requireString,
+  requireWorkstreamStatus,
+  assertWorkstreamStatusTransition
 } from "./validation.js";
 
 export interface SqliteStoreOptions {
@@ -28,8 +30,8 @@ export interface SqliteStoreOptions {
   databaseFileName?: string;
 }
 
-type WorkstreamRow = Omit<Workstream, "repositoryPath" | "createdAt" | "updatedAt"> & {
-  repository_path: string | null;
+type WorkstreamRow = Omit<Workstream, "createdBy" | "createdAt" | "updatedAt"> & {
+  created_by: string;
   created_at: string;
   updated_at: string;
 };
@@ -78,17 +80,19 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     const workstream: Workstream = {
       id: randomUUID(),
       title: requireString(input.title, "title", 160),
-      description: normalizeOptionalString(input.description, 5000),
-      repositoryPath: normalizeOptionalString(input.repositoryPath, 2048),
-      status: "active",
+      goal: requireString(input.goal, "goal", 5000),
+      status: "draft",
+      repo: requireString(input.repo, "repo", 2048),
+      createdBy: requireString(input.createdBy, "createdBy", 160),
+      summary: normalizeOptionalString(input.summary, 5000),
       createdAt: now,
       updatedAt: now
     };
 
     this.db
       .prepare(
-        `INSERT INTO workstreams (id, title, description, repository_path, status, created_at, updated_at)
-         VALUES (@id, @title, @description, @repositoryPath, @status, @createdAt, @updatedAt)`
+        `INSERT INTO workstreams (id, title, goal, status, repo, created_by, summary, created_at, updated_at)
+         VALUES (@id, @title, @goal, @status, @repo, @createdBy, @summary, @createdAt, @updatedAt)`
       )
       .run(workstream);
 
@@ -107,6 +111,28 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       | WorkstreamRow
       | undefined;
     return row ? mapWorkstreamRow(row) : null;
+  }
+
+  updateWorkstreamStatus(id: string, nextStatus: Workstream["status"]): Workstream {
+    const workstreamId = requireId(id);
+    const status = requireWorkstreamStatus(nextStatus);
+    const current = this.getWorkstream(workstreamId);
+    if (!current) {
+      throw new Error(`Workstream ${workstreamId} was not found.`);
+    }
+    assertWorkstreamStatusTransition(current.status, status);
+
+    if (current.status === status) {
+      return current;
+    }
+
+    const updatedAt = new Date().toISOString();
+    this.db.prepare("UPDATE workstreams SET status = ?, updated_at = ? WHERE id = ?").run(status, updatedAt, workstreamId);
+    return {
+      ...current,
+      status,
+      updatedAt
+    };
   }
 
   appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent {
@@ -247,13 +273,27 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
   }
 
   private migrate(): void {
+    this.recreateLegacyWorkstreamSchema();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS workstreams (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
-        description TEXT,
-        repository_path TEXT,
-        status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'archived')),
+        goal TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN (
+          'draft',
+          'planning',
+          'awaiting_plan_approval',
+          'running',
+          'awaiting_user_input',
+          'awaiting_review',
+          'merge_ready',
+          'completed',
+          'failed',
+          'cancelled'
+        )),
+        repo TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        summary TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -301,6 +341,156 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         ON agent_runs(workstream_id);
     `);
   }
+
+  private recreateLegacyWorkstreamSchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(workstreams)").all() as Array<{ name: string }>;
+    if (columns.length === 0) {
+      return;
+    }
+
+    const columnNames = new Set(columns.map((column) => column.name));
+    const hasCanonicalColumns = ["goal", "repo", "created_by", "summary"].every((column) => columnNames.has(column));
+    if (hasCanonicalColumns) {
+      return;
+    }
+
+    const legacyWorkstreams = this.db.prepare("SELECT * FROM workstreams").all() as Array<Record<string, unknown>>;
+    const legacyEvents = this.readLegacyRows("workstream_events");
+    const legacyPlans = this.readLegacyRows("plans");
+    const legacyAgentRuns = this.readLegacyRows("agent_runs");
+
+    this.db.pragma("foreign_keys = OFF");
+    const migrateLegacyData = this.db.transaction(() => {
+      this.db.exec(`
+        DROP TABLE IF EXISTS agent_runs;
+        DROP TABLE IF EXISTS plans;
+        DROP TABLE IF EXISTS workstream_events;
+        DROP TABLE IF EXISTS workstreams;
+      `);
+
+      this.db.exec(`
+        CREATE TABLE workstreams (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          goal TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN (
+            'draft',
+            'planning',
+            'awaiting_plan_approval',
+            'running',
+            'awaiting_user_input',
+            'awaiting_review',
+            'merge_ready',
+            'completed',
+            'failed',
+            'cancelled'
+          )),
+          repo TEXT NOT NULL,
+          created_by TEXT NOT NULL,
+          summary TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE workstream_events (
+          id TEXT PRIMARY KEY,
+          workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          message TEXT NOT NULL,
+          payload_json TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE(workstream_id, sequence)
+        );
+
+        CREATE TABLE plans (
+          id TEXT PRIMARY KEY,
+          workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'rejected', 'superseded')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE agent_runs (
+          id TEXT PRIMARY KEY,
+          workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+          provider_id TEXT NOT NULL,
+          adapter_id TEXT,
+          role TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+          goal TEXT NOT NULL,
+          started_at TEXT,
+          completed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+
+      const insertWorkstream = this.db.prepare(`
+        INSERT INTO workstreams (id, title, goal, status, repo, created_by, summary, created_at, updated_at)
+        VALUES (@id, @title, @goal, @status, @repo, @createdBy, @summary, @createdAt, @updatedAt)
+      `);
+      for (const row of legacyWorkstreams) {
+        const title = String(row.title ?? "Untitled workstream");
+        const summary = nullableString(row.description);
+        insertWorkstream.run({
+          id: String(row.id),
+          title,
+          goal: summary ?? title,
+          status: mapLegacyWorkstreamStatus(nullableString(row.status)),
+          repo: nullableString(row.repository_path) ?? "legacy/local-repository",
+          createdBy: "legacy",
+          summary,
+          createdAt: String(row.created_at ?? new Date().toISOString()),
+          updatedAt: String(row.updated_at ?? row.created_at ?? new Date().toISOString())
+        });
+      }
+
+      const insertEvent = this.db.prepare(`
+        INSERT INTO workstream_events (id, workstream_id, sequence, type, message, payload_json, created_at)
+        VALUES (@id, @workstream_id, @sequence, @type, @message, @payload_json, @created_at)
+      `);
+      for (const row of legacyEvents) {
+        insertEvent.run(row);
+      }
+
+      const insertPlan = this.db.prepare(`
+        INSERT INTO plans (id, workstream_id, title, body, status, created_at, updated_at)
+        VALUES (@id, @workstream_id, @title, @body, @status, @created_at, @updated_at)
+      `);
+      for (const row of legacyPlans) {
+        insertPlan.run(row);
+      }
+
+      const insertAgentRun = this.db.prepare(`
+        INSERT INTO agent_runs (
+          id, workstream_id, provider_id, adapter_id, role, status, goal, started_at, completed_at, created_at, updated_at
+        )
+        VALUES (
+          @id, @workstream_id, @provider_id, @adapter_id, @role, @status, @goal, @started_at, @completed_at, @created_at, @updated_at
+        )
+      `);
+      for (const row of legacyAgentRuns) {
+        insertAgentRun.run(row);
+      }
+    });
+
+    try {
+      migrateLegacyData();
+    } finally {
+      this.db.pragma("foreign_keys = ON");
+    }
+  }
+
+  private readLegacyRows(tableName: string): Array<Record<string, unknown>> {
+    const row = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
+    if (!row) {
+      return [];
+    }
+    return this.db.prepare(`SELECT * FROM ${tableName}`).all() as Array<Record<string, unknown>>;
+  }
 }
 
 export function createSqliteOrchestratorStore(options: SqliteStoreOptions): SqliteOrchestratorStore {
@@ -311,9 +501,11 @@ function mapWorkstreamRow(row: WorkstreamRow): Workstream {
   return {
     id: row.id,
     title: row.title,
-    description: row.description,
-    repositoryPath: row.repository_path,
+    goal: row.goal,
     status: row.status,
+    repo: row.repo,
+    createdBy: row.created_by,
+    summary: row.summary,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -357,4 +549,27 @@ function mapAgentRunRow(row: AgentRunRow): AgentRun {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function nullableString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function mapLegacyWorkstreamStatus(status: string | null): Workstream["status"] {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "paused":
+      return "awaiting_user_input";
+    case "archived":
+      return "cancelled";
+    case "active":
+      return "running";
+    default:
+      return "draft";
+  }
 }

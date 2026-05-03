@@ -48,9 +48,11 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           const created: Workstream = {
             id: `ws-${workstreams.length + 1}`,
             title: input.title,
-            description: input.description ?? null,
-            repositoryPath: input.repositoryPath ?? null,
-            status: "active",
+            goal: input.goal,
+            repo: input.repo,
+            createdBy: input.createdBy,
+            summary: input.summary ?? null,
+            status: "draft",
             createdAt: now,
             updatedAt: now
           };
@@ -88,7 +90,8 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
 
   await page.getByRole("button", { name: "New Workstream" }).click();
   await page.getByLabel("Title").fill("Workstream 1");
-  await page.getByLabel("Description").fill("Created through the secure Electron bridge.");
+  await page.getByLabel("Goal").fill("Created through the secure Electron bridge.");
+  await page.getByLabel("Repository").fill("ss-andrade/mergepilot");
   await page.getByRole("button", { name: "Create workstream" }).click();
 
   await expect(page.getByRole("heading", { level: 2, name: "Workstream 1" })).toBeVisible();
