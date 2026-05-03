@@ -28,6 +28,9 @@ const allowedWorkstreamTransitions: Record<string, Set<string>> = {
 };
 const planStatuses = new Set(["draft", "approved", "rejected", "superseded"]);
 const agentRunStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
+const githubOwnerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const githubRepositoryNamePattern = /^[A-Za-z0-9._-]{1,100}$/;
+const gitRefNamePattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,249}$/;
 
 export function normalizeOptionalString(value: string | null | undefined, maxLength: number): string | null {
   if (value === undefined || value === null) {
@@ -69,6 +72,30 @@ export function requireId(value: string, field = "id"): string {
     throw new Error(`${field} must be a valid local id.`);
   }
   return trimmed;
+}
+
+export function requireGitHubOwner(value: unknown): string {
+  const owner = requireString(value as string, "owner", 39);
+  if (!githubOwnerPattern.test(owner)) {
+    throw new Error("owner must be a valid GitHub owner.");
+  }
+  return owner;
+}
+
+export function requireGitHubRepositoryName(value: unknown): string {
+  const name = requireString(value as string, "name", 100);
+  if (!githubRepositoryNamePattern.test(name) || name === "." || name === ".." || name.toLowerCase() === ".git") {
+    throw new Error("name must be a valid GitHub repository name.");
+  }
+  return name;
+}
+
+export function requireGitHubDefaultBranch(value: unknown): string {
+  const branch = requireString(value as string, "defaultBranch", 250);
+  if (!gitRefNamePattern.test(branch) || branch.includes("..") || branch.endsWith("/") || branch.endsWith(".")) {
+    throw new Error("defaultBranch must be a valid Git branch name.");
+  }
+  return branch;
 }
 
 export function requireEventType(value: string): WorkstreamEventType {

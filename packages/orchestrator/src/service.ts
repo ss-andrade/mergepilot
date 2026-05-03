@@ -1,12 +1,14 @@
 import path from "node:path";
 import {
   AppendWorkstreamEventInput,
+  ConnectGitHubRepositoryInput,
   CreateAgentRunInput,
   CreatePlanInput,
   CreateWorkstreamInput,
   LocalOrchestratorService,
   OrchestratorStatus,
   OrchestratorStore,
+  ReportGitHubRepositoryConnectionErrorInput,
   WorkstreamStatus
 } from "./types.js";
 import { createSqliteOrchestratorStore } from "./sqlite-store.js";
@@ -58,6 +60,22 @@ export class InProcessLocalOrchestrator implements LocalOrchestratorService {
 
   updateWorkstreamStatus(id: string, nextStatus: WorkstreamStatus) {
     return this.requireStore().updateWorkstreamStatus(id, nextStatus);
+  }
+
+  connectGitHubRepository(input: ConnectGitHubRepositoryInput) {
+    return this.requireStore().connectGitHubRepository(input);
+  }
+
+  listGitHubRepositories() {
+    return this.requireStore().listGitHubRepositories();
+  }
+
+  selectGitHubRepository(id: string) {
+    return this.requireStore().selectGitHubRepository(id);
+  }
+
+  recordGitHubRepositoryConnectionError(input: ReportGitHubRepositoryConnectionErrorInput) {
+    return this.requireStore().recordGitHubRepositoryConnectionError(input);
   }
 
   appendEvent(input: AppendWorkstreamEventInput) {

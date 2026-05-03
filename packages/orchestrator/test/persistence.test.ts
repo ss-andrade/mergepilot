@@ -18,6 +18,138 @@ afterEach(async () => {
 });
 
 describe("SqliteOrchestratorStore", () => {
+  it("connects, selects, and persists GitHub repositories", async () => {
+    const dataDir = await createTempDir();
+    const first = createSqliteOrchestratorStore({ dataDir });
+
+    const connected = first.connectGitHubRepository({
+      owner: " ss-andrade ",
+      name: " mergepilot ",
+      defaultBranch: " main ",
+      htmlUrl: "https://github.com/ss-andrade/mergepilot",
+      apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot"
+    });
+
+    expect(connected).toEqual({
+      id: expect.any(String),
+      owner: "ss-andrade",
+      name: "mergepilot",
+      defaultBranch: "main",
+      htmlUrl: "https://github.com/ss-andrade/mergepilot",
+      apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot",
+      connectedAt: expect.any(String),
+      updatedAt: connected.connectedAt,
+      selectedAt: null
+    });
+
+    expect(first.selectGitHubRepository(connected.id)).toMatchObject({
+      id: connected.id,
+      selectedAt: expect.any(String)
+    });
+    first.close();
+
+    const second = createSqliteOrchestratorStore({ dataDir });
+    expect(second.listGitHubRepositories()).toEqual([
+      expect.objectContaining({
+        id: connected.id,
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        selectedAt: expect.any(String)
+      })
+    ]);
+    second.close();
+  });
+
+  it("stores typed GitHub repository scope on workstreams while preserving canonical repo", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const repository = store.connectGitHubRepository({
+      owner: "ss-andrade",
+      name: "mergepilot",
+      defaultBranch: "main"
+    });
+
+    const workstream = store.createWorkstream({
+      title: "GitHub scoped work",
+      goal: "Track work against a connected GitHub repository.",
+      repo: "ignored/manual-value",
+      githubRepository: repository,
+      createdBy: "hermes"
+    });
+
+    expect(workstream).toMatchObject({
+      repo: "ss-andrade/mergepilot",
+      githubRepository: {
+        id: repository.id,
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        htmlUrl: null,
+        apiUrl: null
+      }
+    });
+    expect(store.getWorkstream(workstream.id)).toMatchObject({
+      repo: "ss-andrade/mergepilot",
+      githubRepository: {
+        id: repository.id,
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main"
+      }
+    });
+    store.close();
+  });
+
+  it("validates GitHub repository connection input", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+
+    expect(() =>
+      store.connectGitHubRepository({ owner: "bad owner", name: "mergepilot", defaultBranch: "main" })
+    ).toThrow(/owner/i);
+    expect(() =>
+      store.connectGitHubRepository({ owner: "ss-andrade", name: ".git", defaultBranch: "main" })
+    ).toThrow(/name/i);
+    expect(() =>
+      store.connectGitHubRepository({ owner: "ss-andrade", name: "mergepilot", defaultBranch: "feature branch" })
+    ).toThrow(/defaultBranch/i);
+    expect(store.listGitHubRepositories()).toEqual([]);
+    store.close();
+  });
+
+  it("surfaces GitHub integration errors as human action required timeline events", async () => {
+    const dataDir = await createTempDir();
+    const store = createSqliteOrchestratorStore({ dataDir });
+    const workstream = store.createWorkstream({
+      title: "Repository access",
+      goal: "Connect a repository that requires attention.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+
+    const event = store.recordGitHubRepositoryConnectionError({
+      workstreamId: workstream.id,
+      repository: "ss-andrade/mergepilot",
+      message: "GitHub repository access needs attention.",
+      reason: "not_found"
+    });
+
+    expect(event).toMatchObject({
+      workstreamId: workstream.id,
+      type: "human_action_required",
+      message: "GitHub repository access needs attention.",
+      payload: {
+        integration: "github",
+        surface: "repository_connection",
+        repository: "ss-andrade/mergepilot",
+        reason: "not_found"
+      }
+    });
+    expect(store.listEvents(workstream.id)).toEqual([expect.objectContaining({ id: event.id })]);
+    store.close();
+  });
+
   it("persists workstreams across store instances", async () => {
     const dataDir = await createTempDir();
     const first = createSqliteOrchestratorStore({ dataDir });
@@ -158,6 +290,7 @@ describe("SqliteOrchestratorStore", () => {
       title: "Canonical model",
       goal: "Exercise issue two behavior.",
       repo: "ss-andrade/mergepilot",
+      githubRepository: null,
       createdBy: "hermes",
       summary: null,
       status: "draft",

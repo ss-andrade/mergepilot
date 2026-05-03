@@ -5,13 +5,17 @@ import { randomUUID } from "node:crypto";
 import {
   AgentRun,
   AppendWorkstreamEventInput,
+  ConnectGitHubRepositoryInput,
   CreateAgentRunInput,
   CreatePlanInput,
   CreateWorkstreamInput,
+  GitHubRepositoryConnection,
   OrchestratorStore,
   Plan,
+  ReportGitHubRepositoryConnectionErrorInput,
   Workstream,
   WorkstreamEvent,
+  WorkstreamGitHubRepositoryScope,
   WORKSTREAM_EVENT_TYPES,
   WorkstreamEventType
 } from "./types.js";
@@ -20,6 +24,9 @@ import {
   normalizeOptionalString,
   requireAgentRunStatus,
   requireEventType,
+  requireGitHubDefaultBranch,
+  requireGitHubOwner,
+  requireGitHubRepositoryName,
   requireId,
   requirePlanStatus,
   requireString,
@@ -32,10 +39,11 @@ export interface SqliteStoreOptions {
   databaseFileName?: string;
 }
 
-type WorkstreamRow = Omit<Workstream, "createdBy" | "createdAt" | "updatedAt"> & {
+type WorkstreamRow = Omit<Workstream, "createdBy" | "createdAt" | "updatedAt" | "githubRepository"> & {
   created_by: string;
   created_at: string;
   updated_at: string;
+  github_repository_json: string | null;
 };
 
 type EventRow = Omit<WorkstreamEvent, "workstreamId" | "createdAt" | "payload"> & {
@@ -63,6 +71,15 @@ type AgentRunRow = Omit<
   updated_at: string;
 };
 
+type GitHubRepositoryRow = Omit<GitHubRepositoryConnection, "defaultBranch" | "htmlUrl" | "apiUrl" | "connectedAt" | "updatedAt" | "selectedAt"> & {
+  default_branch: string;
+  html_url: string | null;
+  api_url: string | null;
+  connected_at: string;
+  updated_at: string;
+  selected_at: string | null;
+};
+
 const eventTypeSqlList = WORKSTREAM_EVENT_TYPES.map((type) => `'${type}'`).join(", ");
 
 export class SqliteOrchestratorStore implements OrchestratorStore {
@@ -81,12 +98,15 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
   createWorkstream(input: CreateWorkstreamInput): Workstream {
     const now = new Date().toISOString();
+    const githubRepository = normalizeGitHubRepositoryScope(input.githubRepository);
+    const repo = githubRepository ? `${githubRepository.owner}/${githubRepository.name}` : requireString(input.repo, "repo", 2048);
     const workstream: Workstream = {
       id: randomUUID(),
       title: requireString(input.title, "title", 160),
       goal: requireString(input.goal, "goal", 5000),
       status: "draft",
-      repo: requireString(input.repo, "repo", 2048),
+      repo,
+      githubRepository,
       createdBy: requireString(input.createdBy, "createdBy", 160),
       summary: normalizeOptionalString(input.summary, 5000),
       createdAt: now,
@@ -95,10 +115,17 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
 
     this.db
       .prepare(
-        `INSERT INTO workstreams (id, title, goal, status, repo, created_by, summary, created_at, updated_at)
-         VALUES (@id, @title, @goal, @status, @repo, @createdBy, @summary, @createdAt, @updatedAt)`
+        `INSERT INTO workstreams (
+           id, title, goal, status, repo, github_repository_json, created_by, summary, created_at, updated_at
+         )
+         VALUES (
+           @id, @title, @goal, @status, @repo, @githubRepositoryJson, @createdBy, @summary, @createdAt, @updatedAt
+         )`
       )
-      .run(workstream);
+      .run({
+        ...workstream,
+        githubRepositoryJson: githubRepository ? JSON.stringify(githubRepository) : null
+      });
 
     return workstream;
   }
@@ -137,6 +164,89 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       status,
       updatedAt
     };
+  }
+
+  connectGitHubRepository(input: ConnectGitHubRepositoryInput): GitHubRepositoryConnection {
+    const now = new Date().toISOString();
+    const owner = requireGitHubOwner(input.owner);
+    const name = requireGitHubRepositoryName(input.name);
+    const existing = this.db
+      .prepare("SELECT * FROM github_repositories WHERE owner = ? AND name = ?")
+      .get(owner, name) as GitHubRepositoryRow | undefined;
+    const record = {
+      id: existing?.id ?? randomUUID(),
+      owner,
+      name,
+      defaultBranch: requireGitHubDefaultBranch(input.defaultBranch),
+      htmlUrl: normalizeOptionalString(input.htmlUrl, 2048),
+      apiUrl: normalizeOptionalString(input.apiUrl, 2048),
+      connectedAt: existing?.connected_at ?? now,
+      updatedAt: now,
+      selectedAt: existing?.selected_at ?? null
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO github_repositories (
+           id, owner, name, default_branch, html_url, api_url, connected_at, updated_at, selected_at
+         )
+         VALUES (
+           @id, @owner, @name, @defaultBranch, @htmlUrl, @apiUrl, @connectedAt, @updatedAt, @selectedAt
+         )
+         ON CONFLICT(owner, name) DO UPDATE SET
+           default_branch = excluded.default_branch,
+           html_url = excluded.html_url,
+           api_url = excluded.api_url,
+           updated_at = excluded.updated_at`
+      )
+      .run(record);
+
+    return record;
+  }
+
+  listGitHubRepositories(): GitHubRepositoryConnection[] {
+    const rows = this.db
+      .prepare("SELECT * FROM github_repositories ORDER BY selected_at DESC NULLS LAST, updated_at DESC, owner ASC, name ASC")
+      .all() as GitHubRepositoryRow[];
+    return rows.map(mapGitHubRepositoryRow);
+  }
+
+  selectGitHubRepository(id: string): GitHubRepositoryConnection {
+    const repositoryId = requireId(id, "repositoryId");
+    const current = this.db.prepare("SELECT * FROM github_repositories WHERE id = ?").get(repositoryId) as
+      | GitHubRepositoryRow
+      | undefined;
+    if (!current) {
+      throw new Error(`GitHub repository ${repositoryId} was not found.`);
+    }
+
+    const selectedAt = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE github_repositories SET selected_at = NULL").run();
+      this.db
+        .prepare("UPDATE github_repositories SET selected_at = ?, updated_at = ? WHERE id = ?")
+        .run(selectedAt, selectedAt, repositoryId);
+    })();
+
+    return {
+      ...mapGitHubRepositoryRow(current),
+      updatedAt: selectedAt,
+      selectedAt
+    };
+  }
+
+  recordGitHubRepositoryConnectionError(input: ReportGitHubRepositoryConnectionErrorInput): WorkstreamEvent {
+    return this.appendEvent({
+      workstreamId: input.workstreamId,
+      type: "human_action_required",
+      message: requireString(input.message, "message", 2000),
+      payload: {
+        integration: "github",
+        surface: "repository_connection",
+        repository: requireString(input.repository, "repository", 2048),
+        reason: requireString(input.reason, "reason", 160)
+      }
+    });
   }
 
   appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent {
@@ -296,6 +406,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
           'cancelled'
         )),
         repo TEXT NOT NULL,
+        github_repository_json TEXT,
         created_by TEXT NOT NULL,
         summary TEXT,
         created_at TEXT NOT NULL,
@@ -337,13 +448,29 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS github_repositories (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        default_branch TEXT NOT NULL,
+        html_url TEXT,
+        api_url TEXT,
+        connected_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        selected_at TEXT,
+        UNIQUE(owner, name)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
         ON workstream_events(workstream_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_plans_workstream
         ON plans(workstream_id);
       CREATE INDEX IF NOT EXISTS idx_agent_runs_workstream
         ON agent_runs(workstream_id);
+      CREATE INDEX IF NOT EXISTS idx_github_repositories_selected
+        ON github_repositories(selected_at);
     `);
+    this.ensureWorkstreamsGitHubRepositorySchema();
     this.ensureWorkstreamEventsSchema();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_workstream_events_workstream_sequence
@@ -396,6 +523,7 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
             'cancelled'
           )),
           repo TEXT NOT NULL,
+          github_repository_json TEXT,
           created_by TEXT NOT NULL,
           summary TEXT,
           created_at TEXT NOT NULL,
@@ -439,8 +567,8 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
       `);
 
       const insertWorkstream = this.db.prepare(`
-        INSERT INTO workstreams (id, title, goal, status, repo, created_by, summary, created_at, updated_at)
-        VALUES (@id, @title, @goal, @status, @repo, @createdBy, @summary, @createdAt, @updatedAt)
+        INSERT INTO workstreams (id, title, goal, status, repo, github_repository_json, created_by, summary, created_at, updated_at)
+        VALUES (@id, @title, @goal, @status, @repo, NULL, @createdBy, @summary, @createdAt, @updatedAt)
       `);
       for (const row of legacyWorkstreams) {
         const title = String(row.title ?? "Untitled workstream");
@@ -548,6 +676,13 @@ export class SqliteOrchestratorStore implements OrchestratorStore {
     recreateEvents();
   }
 
+  private ensureWorkstreamsGitHubRepositorySchema(): void {
+    const columns = this.db.prepare("PRAGMA table_info(workstreams)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "github_repository_json")) {
+      this.db.exec("ALTER TABLE workstreams ADD COLUMN github_repository_json TEXT;");
+    }
+  }
+
   private createEventImmutabilityTriggers(): void {
     this.db.exec(`
       CREATE TRIGGER IF NOT EXISTS trg_workstream_events_no_update
@@ -576,11 +711,45 @@ function mapWorkstreamRow(row: WorkstreamRow): Workstream {
     goal: row.goal,
     status: row.status,
     repo: row.repo,
+    githubRepository: row.github_repository_json === null ? null : JSON.parse(row.github_repository_json),
     createdBy: row.created_by,
     summary: row.summary,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function mapGitHubRepositoryRow(row: GitHubRepositoryRow): GitHubRepositoryConnection {
+  return {
+    id: row.id,
+    owner: row.owner,
+    name: row.name,
+    defaultBranch: row.default_branch,
+    htmlUrl: row.html_url,
+    apiUrl: row.api_url,
+    connectedAt: row.connected_at,
+    updatedAt: row.updated_at,
+    selectedAt: row.selected_at
+  };
+}
+
+function normalizeGitHubRepositoryScope(
+  input: WorkstreamGitHubRepositoryScope | GitHubRepositoryConnection | null | undefined
+): WorkstreamGitHubRepositoryScope | null {
+  if (!input) {
+    return null;
+  }
+  const scope: WorkstreamGitHubRepositoryScope = {
+    owner: requireGitHubOwner(input.owner),
+    name: requireGitHubRepositoryName(input.name),
+    defaultBranch: requireGitHubDefaultBranch(input.defaultBranch),
+    htmlUrl: normalizeOptionalString(input.htmlUrl, 2048),
+    apiUrl: normalizeOptionalString(input.apiUrl, 2048)
+  };
+  if (input.id) {
+    scope.id = requireId(input.id, "repositoryId");
+  }
+  return scope;
 }
 
 function mapEventRow(row: EventRow): WorkstreamEvent {

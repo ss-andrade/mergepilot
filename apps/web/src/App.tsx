@@ -34,7 +34,7 @@ import {
   DialogTitle,
   DialogTrigger
 } from "./components/ui/dialog";
-import { Input, Label, Textarea } from "./components/ui/form";
+import { Input, Label, Select, Textarea } from "./components/ui/form";
 import { ThemePreference, useTheme } from "./hooks/useTheme";
 
 interface TimelineState {
@@ -46,7 +46,14 @@ interface WorkstreamFormState {
   title: string;
   goal: string;
   repo: string;
+  repositoryId: string;
   summary: string;
+}
+
+interface GitHubRepositoryFormState {
+  owner: string;
+  name: string;
+  defaultBranch: string;
 }
 
 const fallbackSections = [
@@ -81,7 +88,14 @@ const emptyForm: WorkstreamFormState = {
   title: "",
   goal: "",
   repo: "",
+  repositoryId: "",
   summary: ""
+};
+
+const emptyRepositoryForm: GitHubRepositoryFormState = {
+  owner: "",
+  name: "",
+  defaultBranch: "main"
 };
 
 function formatDate(value: string) {
@@ -116,17 +130,23 @@ export function App() {
   const [runtimeInfo, setRuntimeInfo] = useState<MergePilotRuntimeInfo | null>(null);
   const [orchestratorStatus, setOrchestratorStatus] = useState<OrchestratorStatus | null>(null);
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
+  const [repositories, setRepositories] = useState<GitHubRepositoryConnection[]>([]);
   const [timeline, setTimeline] = useState<TimelineState>({ selectedWorkstreamId: null, events: [] });
   const [error, setError] = useState<string | null>(null);
+  const [humanAttentionMessage, setHumanAttentionMessage] = useState<string | null>(null);
+  const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
   const [newWorkstreamOpen, setNewWorkstreamOpen] = useState(false);
+  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [formState, setFormState] = useState<WorkstreamFormState>(emptyForm);
+  const [repositoryFormState, setRepositoryFormState] = useState<GitHubRepositoryFormState>(emptyRepositoryForm);
 
   const isRunning = orchestratorStatus?.state === "running";
   const selectedWorkstream = workstreams.find((workstream) => workstream.id === timeline.selectedWorkstreamId) ?? null;
+  const selectedRepository = repositories.find((repository) => repository.id === formState.repositoryId) ?? null;
 
   useEffect(() => {
     window.mergePilot.getRuntimeInfo().then(setRuntimeInfo).catch(() => {
@@ -155,12 +175,17 @@ export function App() {
 
     if (status.state !== "running") {
       setWorkstreams([]);
+      setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
       return;
     }
 
-    const nextWorkstreams = await window.mergePilot.workstreams.list();
+    const [nextWorkstreams, nextRepositories] = await Promise.all([
+      window.mergePilot.workstreams.list(),
+      window.mergePilot.github.repositories.list()
+    ]);
     setWorkstreams(nextWorkstreams);
+    setRepositories(nextRepositories);
     const selected = preferredWorkstreamId ?? timeline.selectedWorkstreamId ?? nextWorkstreams[0]?.id ?? null;
     const selectedExists = selected ? nextWorkstreams.some((workstream) => workstream.id === selected) : false;
     const nextSelected = selectedExists ? selected : nextWorkstreams[0]?.id ?? null;
@@ -186,6 +211,7 @@ export function App() {
       const status = await window.mergePilot.orchestrator.stop();
       setOrchestratorStatus(status);
       setWorkstreams([]);
+      setRepositories([]);
       setTimeline({ selectedWorkstreamId: null, events: [] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to stop orchestrator.");
@@ -199,10 +225,23 @@ export function App() {
         await window.mergePilot.orchestrator.start();
       }
       const title = input?.title.trim() || `Workstream ${workstreams.length + 1}`;
+      const repository = input?.repositoryId
+        ? repositories.find((candidate) => candidate.id === input.repositoryId) ?? null
+        : null;
       const created = await window.mergePilot.workstreams.create({
         title,
         goal: input?.goal.trim() || "Coordinate and verify a local engineering goal through MergePilot.",
-        repo: input?.repo.trim() || "local/workspace",
+        repo: repository ? `${repository.owner}/${repository.name}` : input?.repo.trim() || "local/workspace",
+        githubRepository: repository
+          ? {
+              id: repository.id,
+              owner: repository.owner,
+              name: repository.name,
+              defaultBranch: repository.defaultBranch,
+              htmlUrl: repository.htmlUrl,
+              apiUrl: repository.apiUrl
+            }
+          : null,
         createdBy: "renderer",
         summary: input?.summary.trim() || "Created through the secure Electron bridge."
       });
@@ -263,6 +302,64 @@ export function App() {
     });
   }
 
+  async function submitRepository(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setRepositoryError(null);
+    setHumanAttentionMessage(null);
+    try {
+      if (orchestratorStatus?.state !== "running") {
+        await window.mergePilot.orchestrator.start();
+      }
+      const repository = await window.mergePilot.github.repositories.connect({
+        owner: repositoryFormState.owner,
+        name: repositoryFormState.name,
+        defaultBranch: repositoryFormState.defaultBranch,
+        htmlUrl: `https://github.com/${repositoryFormState.owner.trim()}/${repositoryFormState.name.trim()}`,
+        apiUrl: `https://api.github.com/repos/${repositoryFormState.owner.trim()}/${repositoryFormState.name.trim()}`
+      });
+      const selected = await window.mergePilot.github.repositories.select(repository.id);
+      setRepositoryFormState(emptyRepositoryForm);
+      setRepositoryDialogOpen(false);
+      setFormState((current) => ({ ...current, repo: `${selected.owner}/${selected.name}`, repositoryId: selected.id }));
+      await refreshOrchestrator(timeline.selectedWorkstreamId);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Unable to connect GitHub repository.";
+      setError(message);
+      setRepositoryError(message);
+      setHumanAttentionMessage(message);
+      setRepositoryDialogOpen(false);
+      if (selectedWorkstream) {
+        try {
+          await window.mergePilot.github.repositories.reportError({
+            workstreamId: selectedWorkstream.id,
+            repository: `${repositoryFormState.owner}/${repositoryFormState.name}`,
+            message,
+            reason: "repository_connection_failed"
+          });
+          setTimeline({
+            selectedWorkstreamId: selectedWorkstream.id,
+            events: await window.mergePilot.events.list(selectedWorkstream.id)
+          });
+        } catch {
+          // Keep the visible human attention message even if there is no persisted workstream event yet.
+        }
+      }
+    }
+  }
+
+  function selectRepository(repositoryId: string) {
+    const repository = repositories.find((candidate) => candidate.id === repositoryId) ?? null;
+    setFormState((current) => ({
+      ...current,
+      repositoryId,
+      repo: repository ? `${repository.owner}/${repository.name}` : current.repo
+    }));
+    if (repository) {
+      void window.mergePilot.github.repositories.select(repository.id).then(() => refreshOrchestrator(timeline.selectedWorkstreamId));
+    }
+  }
+
   const commandActions = useMemo(
     () => [
       {
@@ -276,6 +373,12 @@ export function App() {
         description: "Toggle the local coordinator process",
         icon: isRunning ? SquareIcon : PlayIcon,
         run: () => void (isRunning ? stopOrchestrator() : startOrchestrator())
+      },
+      {
+        label: "Connect GitHub repo",
+        description: "Add or select a repository scope",
+        icon: GitPullRequestIcon,
+        run: () => setRepositoryDialogOpen(true)
       },
       {
         label: "Open settings",
@@ -382,12 +485,27 @@ export function App() {
               <SquareIcon aria-hidden="true" />
               Stop
             </Button>
+            <Dialog open={repositoryDialogOpen} onOpenChange={setRepositoryDialogOpen}>
+              <DialogTrigger render={<Button variant="outline" />}>
+                <GitPullRequestIcon aria-hidden="true" />
+                Connect GitHub repo
+              </DialogTrigger>
+              <RepositoryDialog error={repositoryError} formState={repositoryFormState} onSubmit={submitRepository} setFormState={setRepositoryFormState} />
+            </Dialog>
             <Dialog open={newWorkstreamOpen} onOpenChange={setNewWorkstreamOpen}>
               <DialogTrigger render={<Button />}>
                 <PlusIcon aria-hidden="true" />
                 New Workstream
               </DialogTrigger>
-              <NewWorkstreamDialog formState={formState} setFormState={setFormState} onGoalChange={updateGoalPrompt} onSubmit={submitWorkstream} />
+              <NewWorkstreamDialog
+                formState={formState}
+                repositories={repositories}
+                selectedRepository={selectedRepository}
+                setFormState={setFormState}
+                onGoalChange={updateGoalPrompt}
+                onRepositoryChange={selectRepository}
+                onSubmit={submitWorkstream}
+              />
             </Dialog>
           </div>
         </header>
@@ -507,6 +625,41 @@ export function App() {
               )}
             </Panel>
 
+            <Panel className="mp-github-repositories" role="region" aria-label="GitHub repositories">
+              <div className="mp-section-heading">
+                <div>
+                  <p className="mp-eyebrow">GitHub integration</p>
+                  <h3>Repositories</h3>
+                </div>
+                <Button variant="outline" onClick={() => setRepositoryDialogOpen(true)}>
+                  <GitPullRequestIcon aria-hidden="true" />
+                  Add repository
+                </Button>
+              </div>
+              <div className="mp-repository-list">
+                {repositories.length > 0 ? (
+                  repositories.map((repository) => (
+                    <button
+                      className="mp-repository-row"
+                      data-selected={repository.selectedAt ? "true" : undefined}
+                      key={repository.id}
+                      onClick={() => selectRepository(repository.id)}
+                      type="button"
+                    >
+                      <span>{repository.owner}/{repository.name}</span>
+                      <small>Default branch {repository.defaultBranch}</small>
+                    </button>
+                  ))
+                ) : (
+                  <div className="mp-empty-state">
+                    <GitPullRequestIcon aria-hidden="true" />
+                    <strong>No GitHub repositories connected</strong>
+                    <p>Connect a repository to scope new workstreams to owner, name, and default branch metadata.</p>
+                  </div>
+                )}
+              </div>
+            </Panel>
+
             <Panel className="mp-timeline" id="timeline" aria-label="Event timeline">
               <div className="mp-section-heading">
                 <div>
@@ -553,7 +706,7 @@ export function App() {
               </p>
               <div className="mp-attention-placeholder">
                 <BellIcon aria-hidden="true" />
-                <span>No human action required right now.</span>
+                <span>{humanAttentionMessage ?? "No human action required right now."}</span>
               </div>
             </Panel>
 
@@ -630,12 +783,18 @@ function StatusLine({ icon, label, value }: { icon: ReactNode; label: string; va
 function NewWorkstreamDialog({
   formState,
   onGoalChange,
+  onRepositoryChange,
   onSubmit,
+  repositories,
+  selectedRepository,
   setFormState
 }: {
   formState: WorkstreamFormState;
   onGoalChange: (goal: string) => void;
+  onRepositoryChange: (repositoryId: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  repositories: GitHubRepositoryConnection[];
+  selectedRepository: GitHubRepositoryConnection | null;
   setFormState: (state: WorkstreamFormState) => void;
 }) {
   return (
@@ -668,12 +827,24 @@ function NewWorkstreamDialog({
           </div>
           <div>
             <Label htmlFor="workstream-repo">Repository</Label>
-            <Input
-              id="workstream-repo"
-              onChange={(event) => setFormState({ ...formState, repo: event.target.value })}
-              placeholder="ss-andrade/mergepilot"
-              value={formState.repo}
-            />
+            {repositories.length > 0 ? (
+              <Select id="workstream-repo" onChange={(event) => onRepositoryChange(event.target.value)} value={formState.repositoryId}>
+                <option value="">Select a connected repository</option>
+                {repositories.map((repository) => (
+                  <option key={repository.id} value={repository.id}>
+                    {repository.owner}/{repository.name}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <Input
+                id="workstream-repo"
+                onChange={(event) => setFormState({ ...formState, repo: event.target.value, repositoryId: "" })}
+                placeholder="ss-andrade/mergepilot"
+                value={formState.repo}
+              />
+            )}
+            {selectedRepository ? <p className="mp-field-description">Default branch: {selectedRepository.defaultBranch}</p> : null}
           </div>
           <div>
             <Label htmlFor="workstream-summary">Summary</Label>
@@ -690,6 +861,50 @@ function NewWorkstreamDialog({
           <Button type="submit">
             <PlusIcon aria-hidden="true" />
             Create workstream
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
+function RepositoryDialog({
+  error,
+  formState,
+  onSubmit,
+  setFormState
+}: {
+  error: string | null;
+  formState: GitHubRepositoryFormState;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  setFormState: (state: GitHubRepositoryFormState) => void;
+}) {
+  return (
+    <DialogContent>
+      <form onSubmit={onSubmit}>
+        <DialogHeader>
+          <DialogTitle>Connect GitHub repository</DialogTitle>
+          <DialogDescription>Store owner, repository name, and default branch metadata for workstream scoping.</DialogDescription>
+        </DialogHeader>
+        <DialogBody className="mp-form-grid">
+          <div>
+            <Label htmlFor="github-owner">Owner</Label>
+            <Input id="github-owner" onChange={(event) => setFormState({ ...formState, owner: event.target.value })} placeholder="ss-andrade" required value={formState.owner} />
+          </div>
+          <div>
+            <Label htmlFor="github-name">Repository name</Label>
+            <Input id="github-name" onChange={(event) => setFormState({ ...formState, name: event.target.value })} placeholder="mergepilot" required value={formState.name} />
+          </div>
+          <div>
+            <Label htmlFor="github-default-branch">Default branch</Label>
+            <Input id="github-default-branch" onChange={(event) => setFormState({ ...formState, defaultBranch: event.target.value })} placeholder="main" required value={formState.defaultBranch} />
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
+          <Button type="submit">
+            <GitPullRequestIcon aria-hidden="true" />
+            Connect repository
           </Button>
         </DialogFooter>
       </form>

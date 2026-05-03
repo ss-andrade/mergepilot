@@ -38,6 +38,7 @@ export interface Workstream {
   goal: string;
   status: WorkstreamStatus;
   repo: string;
+  githubRepository: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary: string | null;
   createdAt: string;
@@ -48,8 +49,45 @@ export interface CreateWorkstreamInput {
   title: string;
   goal: string;
   repo: string;
+  githubRepository?: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary?: string | null;
+}
+
+export interface GitHubRepositoryConnection {
+  id: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl: string | null;
+  apiUrl: string | null;
+  connectedAt: string;
+  updatedAt: string;
+  selectedAt: string | null;
+}
+
+export interface WorkstreamGitHubRepositoryScope {
+  id?: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+export interface ConnectGitHubRepositoryInput {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+export interface ReportGitHubRepositoryConnectionErrorInput {
+  workstreamId: string;
+  repository: string;
+  message: string;
+  reason: string;
 }
 
 export interface WorkstreamEvent {
@@ -114,6 +152,10 @@ export interface OrchestratorStore {
   listWorkstreams(): Workstream[];
   getWorkstream(id: string): Workstream | null;
   updateWorkstreamStatus(id: string, nextStatus: WorkstreamStatus): Workstream;
+  connectGitHubRepository(input: ConnectGitHubRepositoryInput): GitHubRepositoryConnection;
+  listGitHubRepositories(): GitHubRepositoryConnection[];
+  selectGitHubRepository(id: string): GitHubRepositoryConnection;
+  recordGitHubRepositoryConnectionError(input: ReportGitHubRepositoryConnectionErrorInput): WorkstreamEvent;
   appendEvent(input: AppendWorkstreamEventInput): WorkstreamEvent;
   listEvents(workstreamId: string): WorkstreamEvent[];
   createPlan(input: CreatePlanInput): Plan;

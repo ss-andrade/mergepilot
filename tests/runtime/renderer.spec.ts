@@ -14,6 +14,19 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
     let running = false;
     let sequence = 0;
     const createCalls: CreateWorkstreamInput[] = [];
+    const repositories: GitHubRepositoryConnection[] = [
+      {
+        id: "repo-existing",
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        htmlUrl: "https://github.com/ss-andrade/mergepilot",
+        apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot",
+        connectedAt: now,
+        updatedAt: now,
+        selectedAt: now
+      }
+    ];
     const workstreams: Workstream[] = [
       {
         id: "ws-empty",
@@ -116,6 +129,58 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
           return workstream;
         }
       },
+      github: {
+        repositories: {
+          connect: async (input) => {
+            if (input.owner === "missing") {
+              throw new Error("Repository not found or inaccessible.");
+            }
+            const created: GitHubRepositoryConnection = {
+              id: `repo-${repositories.length + 1}`,
+              owner: input.owner,
+              name: input.name,
+              defaultBranch: input.defaultBranch,
+              htmlUrl: input.htmlUrl ?? null,
+              apiUrl: input.apiUrl ?? null,
+              connectedAt: now,
+              updatedAt: now,
+              selectedAt: null
+            };
+            repositories.push(created);
+            return created;
+          },
+          list: async () => [...repositories],
+          select: async (id) => {
+            const selected = repositories.find((repository) => repository.id === id);
+            if (!selected) {
+              throw new Error(`Missing repository ${id}`);
+            }
+            for (const repository of repositories) {
+              repository.selectedAt = repository.id === id ? now : null;
+            }
+            return selected;
+          },
+          reportError: async (input) => {
+            const created: WorkstreamEvent = {
+              id: `event-${sequence + 1}`,
+              workstreamId: input.workstreamId,
+              sequence: sequence + 1,
+              type: "human_action_required",
+              message: input.message,
+              payload: {
+                integration: "github",
+                surface: "repository_connection",
+                repository: input.repository,
+                reason: input.reason
+              },
+              createdAt: now
+            };
+            sequence += 1;
+            events.push(created);
+            return created;
+          }
+        }
+      },
       events: {
         append: async (input) => {
           const created: WorkstreamEvent = {
@@ -150,6 +215,8 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("Show canonical events for an existing workstream.");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("ss-andrade/mergepilot");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("renderer");
+  await expect(page.getByRole("region", { name: "GitHub repositories" })).toContainText("ss-andrade/mergepilot");
+  await expect(page.getByRole("region", { name: "GitHub repositories" })).toContainText("main");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("plan_created");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("human_action_required");
   await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Plan approvals, blockers, and access requests");
@@ -162,7 +229,7 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await page.getByLabel("Goal prompt").fill("Build a basic workstream UI with a list, detail page, and human attention placeholder.");
   await expect(page.getByLabel("Title")).toHaveValue("Build a basic workstream UI");
   await page.getByLabel("Summary").fill("Basic workstream UI is ready to track.");
-  await page.getByLabel("Repository").fill("ss-andrade/mergepilot");
+  await page.getByLabel("Repository").selectOption("repo-existing");
   await page.getByRole("button", { name: "Create workstream" }).click();
 
   await expect(page.getByRole("heading", { level: 2, name: "Build a basic workstream UI" })).toBeVisible();
@@ -172,8 +239,29 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
     title: "Build a basic workstream UI",
     goal: "Build a basic workstream UI with a list, detail page, and human attention placeholder.",
     repo: "ss-andrade/mergepilot",
+    githubRepository: {
+      id: "repo-existing",
+      owner: "ss-andrade",
+      name: "mergepilot",
+      defaultBranch: "main"
+    },
     createdBy: "renderer",
     summary: "Basic workstream UI is ready to track."
   });
+
+  await page.getByRole("button", { name: "Connect GitHub repo" }).click();
+  await page.getByLabel("Owner").fill("openai");
+  await page.getByLabel("Repository name").fill("codex");
+  await page.getByLabel("Default branch").fill("main");
+  await page.getByRole("button", { name: "Connect repository" }).click();
+  await expect(page.getByRole("region", { name: "GitHub repositories" })).toContainText("openai/codex");
+
+  await page.getByRole("button", { name: "Connect GitHub repo" }).click();
+  await page.getByLabel("Owner").fill("missing");
+  await page.getByLabel("Repository name").fill("private-repo");
+  await page.getByLabel("Default branch").fill("main");
+  await page.getByRole("button", { name: "Connect repository" }).click();
+  await expect(page.getByRole("alert")).toContainText("Repository not found or inaccessible.");
+  await expect(page.getByRole("region", { name: "Human attention" })).toContainText("Repository not found or inaccessible.");
   expect(runtimeFailures).toEqual([]);
 });
