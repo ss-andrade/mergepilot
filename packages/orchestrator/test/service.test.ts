@@ -60,6 +60,32 @@ describe("LocalOrchestratorService", () => {
     expect(orchestrator.status()).toMatchObject({ state: "stopped" });
   });
 
+  it("serves GitHub repository connections through the local service", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({ dataDir });
+    await orchestrator.start();
+
+    const repository = orchestrator.connectGitHubRepository({
+      owner: "ss-andrade",
+      name: "mergepilot",
+      defaultBranch: "main"
+    });
+
+    expect(orchestrator.selectGitHubRepository(repository.id)).toMatchObject({
+      id: repository.id,
+      selectedAt: expect.any(String)
+    });
+    expect(orchestrator.listGitHubRepositories()).toEqual([
+      expect.objectContaining({
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main"
+      })
+    ]);
+
+    await orchestrator.stop();
+  });
+
   it("rejects data operations while stopped", async () => {
     const orchestrator = createLocalOrchestrator({ dataDir: await createTempDir() });
 

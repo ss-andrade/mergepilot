@@ -69,7 +69,39 @@ describe("orchestrator IPC handlers", () => {
         payload: { ok: true },
         createdAt: "2026-05-01T00:02:00.000Z"
       })),
-      listEvents: vi.fn(() => [])
+      listEvents: vi.fn(() => []),
+      connectGitHubRepository: vi.fn(() => ({
+        id: "repo-1",
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        htmlUrl: "https://github.com/ss-andrade/mergepilot",
+        apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot",
+        connectedAt: "2026-05-01T00:03:00.000Z",
+        updatedAt: "2026-05-01T00:03:00.000Z",
+        selectedAt: null
+      })),
+      listGitHubRepositories: vi.fn(() => []),
+      selectGitHubRepository: vi.fn(() => ({
+        id: "repo-1",
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        htmlUrl: null,
+        apiUrl: null,
+        connectedAt: "2026-05-01T00:03:00.000Z",
+        updatedAt: "2026-05-01T00:04:00.000Z",
+        selectedAt: "2026-05-01T00:04:00.000Z"
+      })),
+      recordGitHubRepositoryConnectionError: vi.fn(() => ({
+        id: "evt-2",
+        workstreamId: "ws-1",
+        sequence: 2,
+        type: "human_action_required",
+        message: "GitHub repository access needs attention.",
+        payload: { integration: "github" },
+        createdAt: "2026-05-01T00:05:00.000Z"
+      }))
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -93,6 +125,27 @@ describe("orchestrator IPC handlers", () => {
       id: "ws-1",
       status: "planning"
     });
+    await expect(
+      ipc.invoke("github:repositories:connect", {
+        owner: "ss-andrade",
+        name: "mergepilot",
+        defaultBranch: "main",
+        htmlUrl: "https://github.com/ss-andrade/mergepilot",
+        apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot"
+      })
+    ).resolves.toMatchObject({ id: "repo-1" });
+    await expect(ipc.invoke("github:repositories:select", { repositoryId: "repo-1" })).resolves.toMatchObject({
+      id: "repo-1",
+      selectedAt: expect.any(String)
+    });
+    await expect(
+      ipc.invoke("github:repositories:report-error", {
+        workstreamId: "ws-1",
+        repository: "ss-andrade/mergepilot",
+        message: "GitHub repository access needs attention.",
+        reason: "not_found"
+      })
+    ).resolves.toMatchObject({ type: "human_action_required" });
 
     expect(orchestrator.createWorkstream).toHaveBeenCalledWith({
       title: "IPC work",
@@ -107,6 +160,20 @@ describe("orchestrator IPC handlers", () => {
       payload: { ok: true }
     });
     expect(orchestrator.updateWorkstreamStatus).toHaveBeenCalledWith("ws-1", "planning");
+    expect(orchestrator.connectGitHubRepository).toHaveBeenCalledWith({
+      owner: "ss-andrade",
+      name: "mergepilot",
+      defaultBranch: "main",
+      htmlUrl: "https://github.com/ss-andrade/mergepilot",
+      apiUrl: "https://api.github.com/repos/ss-andrade/mergepilot"
+    });
+    expect(orchestrator.selectGitHubRepository).toHaveBeenCalledWith("repo-1");
+    expect(orchestrator.recordGitHubRepositoryConnectionError).toHaveBeenCalledWith({
+      workstreamId: "ws-1",
+      repository: "ss-andrade/mergepilot",
+      message: "GitHub repository access needs attention.",
+      reason: "not_found"
+    });
   });
 
   it("validates IPC input before calling services", async () => {
@@ -120,7 +187,11 @@ describe("orchestrator IPC handlers", () => {
       getWorkstream: vi.fn(),
       updateWorkstreamStatus: vi.fn(),
       appendEvent: vi.fn(),
-      listEvents: vi.fn()
+      listEvents: vi.fn(),
+      connectGitHubRepository: vi.fn(),
+      listGitHubRepositories: vi.fn(),
+      selectGitHubRepository: vi.fn(),
+      recordGitHubRepositoryConnectionError: vi.fn()
     };
 
     registerOrchestratorIpcHandlers(ipc, orchestrator);
@@ -144,9 +215,15 @@ describe("orchestrator IPC handlers", () => {
       })
     ).rejects.toThrow(/payload/i);
     await expect(ipc.invoke("events:list", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
+    await expect(
+      ipc.invoke("github:repositories:connect", { owner: "bad owner", name: "mergepilot", defaultBranch: "main" })
+    ).rejects.toThrow(/owner/i);
+    await expect(ipc.invoke("github:repositories:select", { repositoryId: "../bad" })).rejects.toThrow(/repositoryId/i);
     expect(orchestrator.createWorkstream).not.toHaveBeenCalled();
     expect(orchestrator.updateWorkstreamStatus).not.toHaveBeenCalled();
     expect(orchestrator.appendEvent).not.toHaveBeenCalled();
     expect(orchestrator.listEvents).not.toHaveBeenCalled();
+    expect(orchestrator.connectGitHubRepository).not.toHaveBeenCalled();
+    expect(orchestrator.selectGitHubRepository).not.toHaveBeenCalled();
   });
 });

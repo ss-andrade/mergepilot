@@ -46,6 +46,7 @@ interface Workstream {
   goal: string;
   status: WorkstreamStatus;
   repo: string;
+  githubRepository: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary: string | null;
   createdAt: string;
@@ -56,8 +57,45 @@ interface CreateWorkstreamInput {
   title: string;
   goal: string;
   repo: string;
+  githubRepository?: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary?: string | null;
+}
+
+interface GitHubRepositoryConnection {
+  id: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl: string | null;
+  apiUrl: string | null;
+  connectedAt: string;
+  updatedAt: string;
+  selectedAt: string | null;
+}
+
+interface WorkstreamGitHubRepositoryScope {
+  id?: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+interface ConnectGitHubRepositoryInput {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+interface ReportGitHubRepositoryConnectionErrorInput {
+  workstreamId: string;
+  repository: string;
+  message: string;
+  reason: string;
 }
 
 interface WorkstreamEvent {
@@ -93,6 +131,14 @@ interface MergePilotDesktopApi {
     list(): Promise<Workstream[]>;
     get(id: string): Promise<Workstream | null>;
     updateStatus(id: string, status: WorkstreamStatus): Promise<Workstream>;
+  };
+  github: {
+    repositories: {
+      connect(input: ConnectGitHubRepositoryInput): Promise<GitHubRepositoryConnection>;
+      list(): Promise<GitHubRepositoryConnection[]>;
+      select(id: string): Promise<GitHubRepositoryConnection>;
+      reportError(input: ReportGitHubRepositoryConnectionErrorInput): Promise<WorkstreamEvent>;
+    };
   };
   events: {
     append(input: AppendWorkstreamEventInput): Promise<WorkstreamEvent>;

@@ -1,7 +1,10 @@
 import type {
   AppendWorkstreamEventInput,
+  ConnectGitHubRepositoryInput,
   CreateWorkstreamInput,
   LocalOrchestratorService,
+  ReportGitHubRepositoryConnectionErrorInput,
+  WorkstreamGitHubRepositoryScope,
   WorkstreamEventType,
   WorkstreamStatus
 } from "@mergepilot/orchestrator";
@@ -28,6 +31,10 @@ export function registerOrchestratorIpcHandlers(
     | "listWorkstreams"
     | "getWorkstream"
     | "updateWorkstreamStatus"
+    | "connectGitHubRepository"
+    | "listGitHubRepositories"
+    | "selectGitHubRepository"
+    | "recordGitHubRepositoryConnectionError"
     | "appendEvent"
     | "listEvents"
   >
@@ -61,6 +68,20 @@ export function registerOrchestratorIpcHandlers(
     return orchestrator.updateWorkstreamStatus(id, parseWorkstreamStatus(input.status));
   });
 
+  ipc.handle("github:repositories:connect", (_event, rawInput) => {
+    return orchestrator.connectGitHubRepository(parseConnectGitHubRepositoryInput(rawInput));
+  });
+
+  ipc.handle("github:repositories:list", () => orchestrator.listGitHubRepositories());
+
+  ipc.handle("github:repositories:select", (_event, rawInput) => {
+    return orchestrator.selectGitHubRepository(parseIdInput(rawInput, "repositoryId"));
+  });
+
+  ipc.handle("github:repositories:report-error", (_event, rawInput) => {
+    return orchestrator.recordGitHubRepositoryConnectionError(parseReportGitHubRepositoryConnectionErrorInput(rawInput));
+  });
+
   ipc.handle("events:append", (_event, rawInput) => {
     return orchestrator.appendEvent(parseAppendEventInput(rawInput));
   });
@@ -83,8 +104,58 @@ function parseCreateWorkstreamInput(rawInput: unknown): CreateWorkstreamInput {
   if ("summary" in input) {
     parsed.summary = optionalBoundedString(input.summary, "summary", 5000);
   }
+  if ("githubRepository" in input && input.githubRepository !== null && input.githubRepository !== undefined) {
+    parsed.githubRepository = parseGitHubRepositoryScope(input.githubRepository);
+  }
 
   return parsed;
+}
+
+function parseConnectGitHubRepositoryInput(rawInput: unknown): ConnectGitHubRepositoryInput {
+  const input = requireRecord(rawInput);
+  const parsed: ConnectGitHubRepositoryInput = {
+    owner: requireGitHubOwner(input.owner),
+    name: requireGitHubRepositoryName(input.name),
+    defaultBranch: requireGitHubDefaultBranch(input.defaultBranch)
+  };
+  if ("htmlUrl" in input) {
+    parsed.htmlUrl = optionalBoundedString(input.htmlUrl, "htmlUrl", 2048);
+  }
+  if ("apiUrl" in input) {
+    parsed.apiUrl = optionalBoundedString(input.apiUrl, "apiUrl", 2048);
+  }
+  return parsed;
+}
+
+function parseGitHubRepositoryScope(rawInput: unknown): WorkstreamGitHubRepositoryScope {
+  const input = requireRecord(rawInput);
+  const parsed: WorkstreamGitHubRepositoryScope = {
+    owner: requireGitHubOwner(input.owner),
+    name: requireGitHubRepositoryName(input.name),
+    defaultBranch: requireGitHubDefaultBranch(input.defaultBranch)
+  };
+  if ("id" in input && input.id !== undefined && input.id !== null) {
+    parsed.id = parseIdInput(input.id, "repositoryId");
+  }
+  if ("htmlUrl" in input) {
+    parsed.htmlUrl = optionalBoundedString(input.htmlUrl, "htmlUrl", 2048);
+  }
+  if ("apiUrl" in input) {
+    parsed.apiUrl = optionalBoundedString(input.apiUrl, "apiUrl", 2048);
+  }
+  return parsed;
+}
+
+function parseReportGitHubRepositoryConnectionErrorInput(
+  rawInput: unknown
+): ReportGitHubRepositoryConnectionErrorInput {
+  const input = requireRecord(rawInput);
+  return {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId"),
+    repository: requireBoundedString(input.repository, "repository", 2048),
+    message: requireBoundedString(input.message, "message", 2000),
+    reason: requireBoundedString(input.reason, "reason", 160)
+  };
 }
 
 function parseAppendEventInput(rawInput: unknown): AppendWorkstreamEventInput {
@@ -133,6 +204,30 @@ function requireBoundedString(value: unknown, field: string, maxLength: number):
     throw new Error(`${field} must be ${maxLength} characters or fewer.`);
   }
   return trimmed;
+}
+
+function requireGitHubOwner(value: unknown): string {
+  const owner = requireBoundedString(value, "owner", 39);
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(owner)) {
+    throw new Error("owner must be a valid GitHub owner.");
+  }
+  return owner;
+}
+
+function requireGitHubRepositoryName(value: unknown): string {
+  const name = requireBoundedString(value, "name", 100);
+  if (!/^[A-Za-z0-9._-]{1,100}$/.test(name) || name === "." || name === ".." || name.toLowerCase() === ".git") {
+    throw new Error("name must be a valid GitHub repository name.");
+  }
+  return name;
+}
+
+function requireGitHubDefaultBranch(value: unknown): string {
+  const branch = requireBoundedString(value, "defaultBranch", 250);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,249}$/.test(branch) || branch.includes("..") || branch.endsWith("/") || branch.endsWith(".")) {
+    throw new Error("defaultBranch must be a valid Git branch name.");
+  }
+  return branch;
 }
 
 function optionalBoundedString(value: unknown, field: string, maxLength: number): string | null {

@@ -48,6 +48,7 @@ export interface Workstream {
   goal: string;
   status: WorkstreamStatus;
   repo: string;
+  githubRepository: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary: string | null;
   createdAt: string;
@@ -58,8 +59,45 @@ export interface CreateWorkstreamInput {
   title: string;
   goal: string;
   repo: string;
+  githubRepository?: WorkstreamGitHubRepositoryScope | null;
   createdBy: string;
   summary?: string | null;
+}
+
+export interface GitHubRepositoryConnection {
+  id: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl: string | null;
+  apiUrl: string | null;
+  connectedAt: string;
+  updatedAt: string;
+  selectedAt: string | null;
+}
+
+export interface WorkstreamGitHubRepositoryScope {
+  id?: string;
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+export interface ConnectGitHubRepositoryInput {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  htmlUrl?: string | null;
+  apiUrl?: string | null;
+}
+
+export interface ReportGitHubRepositoryConnectionErrorInput {
+  workstreamId: string;
+  repository: string;
+  message: string;
+  reason: string;
 }
 
 export interface WorkstreamEvent {
@@ -96,6 +134,14 @@ export interface MergePilotDesktopApi {
     get(id: string): Promise<Workstream | null>;
     updateStatus(id: string, status: WorkstreamStatus): Promise<Workstream>;
   };
+  github: {
+    repositories: {
+      connect(input: ConnectGitHubRepositoryInput): Promise<GitHubRepositoryConnection>;
+      list(): Promise<GitHubRepositoryConnection[]>;
+      select(id: string): Promise<GitHubRepositoryConnection>;
+      reportError(input: ReportGitHubRepositoryConnectionErrorInput): Promise<WorkstreamEvent>;
+    };
+  };
   events: {
     append(input: AppendWorkstreamEventInput): Promise<WorkstreamEvent>;
     list(workstreamId: string): Promise<WorkstreamEvent[]>;
@@ -118,6 +164,14 @@ const desktopApi: MergePilotDesktopApi = {
     list: () => ipcRenderer.invoke("workstreams:list"),
     get: (id) => ipcRenderer.invoke("workstreams:get", { workstreamId: id }),
     updateStatus: (id, status) => ipcRenderer.invoke("workstreams:update-status", { workstreamId: id, status })
+  },
+  github: {
+    repositories: {
+      connect: (input) => ipcRenderer.invoke("github:repositories:connect", input),
+      list: () => ipcRenderer.invoke("github:repositories:list"),
+      select: (id) => ipcRenderer.invoke("github:repositories:select", { repositoryId: id }),
+      reportError: (input) => ipcRenderer.invoke("github:repositories:report-error", input)
+    }
   },
   events: {
     append: (input) => ipcRenderer.invoke("events:append", input),
