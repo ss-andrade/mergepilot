@@ -64,7 +64,7 @@ describe("orchestrator IPC handlers", () => {
         id: "evt-1",
         workstreamId: "ws-1",
         sequence: 1,
-        type: "ipc.event",
+        type: "user_message",
         message: "IPC event",
         payload: { ok: true },
         createdAt: "2026-05-01T00:02:00.000Z"
@@ -85,7 +85,7 @@ describe("orchestrator IPC handlers", () => {
     ).resolves.toMatchObject({ id: "ws-1" });
     await ipc.invoke("events:append", {
       workstreamId: "ws-1",
-      type: "ipc.event",
+      type: "user_message",
       message: "IPC event",
       payload: { ok: true }
     });
@@ -102,7 +102,7 @@ describe("orchestrator IPC handlers", () => {
     });
     expect(orchestrator.appendEvent).toHaveBeenCalledWith({
       workstreamId: "ws-1",
-      type: "ipc.event",
+      type: "user_message",
       message: "IPC event",
       payload: { ok: true }
     });
@@ -132,9 +132,21 @@ describe("orchestrator IPC handlers", () => {
       createdBy: "renderer"
     })).rejects.toThrow(/goal/i);
     await expect(ipc.invoke("workstreams:update-status", { workstreamId: "ws-1", status: "active" })).rejects.toThrow(/status/i);
+    await expect(
+      ipc.invoke("events:append", { workstreamId: "ws-1", type: "workstream.created", message: "Invalid event" })
+    ).rejects.toThrow(/event type/i);
+    await expect(
+      ipc.invoke("events:append", {
+        workstreamId: "ws-1",
+        type: "command_ran",
+        message: "Invalid payload",
+        payload: { elided: undefined }
+      })
+    ).rejects.toThrow(/payload/i);
     await expect(ipc.invoke("events:list", { workstreamId: "../bad" })).rejects.toThrow(/workstreamId/i);
     expect(orchestrator.createWorkstream).not.toHaveBeenCalled();
     expect(orchestrator.updateWorkstreamStatus).not.toHaveBeenCalled();
+    expect(orchestrator.appendEvent).not.toHaveBeenCalled();
     expect(orchestrator.listEvents).not.toHaveBeenCalled();
   });
 });

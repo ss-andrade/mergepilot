@@ -24,6 +24,23 @@ export type WorkstreamStatus =
   | "completed"
   | "failed"
   | "cancelled";
+export type WorkstreamEventType =
+  | "user_message"
+  | "coordinator_message"
+  | "plan_created"
+  | "plan_approved"
+  | "agent_started"
+  | "agent_completed"
+  | "command_ran"
+  | "commit_created"
+  | "branch_pushed"
+  | "pr_opened"
+  | "ci_started"
+  | "ci_passed"
+  | "ci_failed"
+  | "review_summary_created"
+  | "human_action_required"
+  | "workstream_completed";
 
 export interface Workstream {
   id: string;
@@ -49,7 +66,7 @@ export interface WorkstreamEvent {
   id: string;
   workstreamId: string;
   sequence: number;
-  type: string;
+  type: WorkstreamEventType;
   message: string;
   payload: unknown | null;
   createdAt: string;
@@ -57,7 +74,7 @@ export interface WorkstreamEvent {
 
 export interface AppendWorkstreamEventInput {
   workstreamId: string;
-  type: string;
+  type: WorkstreamEventType;
   message: string;
   payload?: unknown;
 }

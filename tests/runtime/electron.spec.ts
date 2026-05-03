@@ -49,18 +49,18 @@ test("built Electron app persists workstreams across restarts in an isolated use
 
     await firstRun.page.getByRole("button", { name: "New Workstream" }).click();
     await expect(firstRun.page.getByText("1 persisted workstream(s)")).toBeVisible();
-    await expect(firstRun.page.getByText("workstream.created")).toBeVisible();
+    await expect(firstRun.page.getByText("user_message")).toBeVisible();
 
     await firstRun.page.getByRole("button", { name: "Add event" }).click();
-    await expect(firstRun.page.getByText("timeline.note")).toBeVisible();
+    await expect(firstRun.page.getByText("coordinator_message")).toBeVisible();
     await firstRun.electronApp.close();
 
     const secondRun = await launchApp();
     await secondRun.page.getByRole("button", { name: "Start" }).click();
     await expect(secondRun.page.getByText("1 persisted workstream(s)")).toBeVisible();
     await expect(secondRun.page.getByRole("heading", { name: "Workstream 1" })).toBeVisible();
-    await expect(secondRun.page.getByText("workstream.created")).toBeVisible();
-    await expect(secondRun.page.getByText("timeline.note")).toBeVisible();
+    await expect(secondRun.page.getByText("user_message")).toBeVisible();
+    await expect(secondRun.page.getByText("coordinator_message")).toBeVisible();
     await secondRun.electronApp.close();
 
     expect(runtimeFailures).toEqual([]);
