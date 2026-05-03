@@ -624,6 +624,57 @@ kbd {
   padding: 16px;
 }
 
+.mp-workstream-detail,
+.mp-human-attention {
+  display: grid;
+  gap: 14px;
+}
+
+.mp-detail-summary,
+.mp-human-attention > p:not(.mp-eyebrow),
+.mp-detail-goal p {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
+.mp-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.mp-detail-grid div,
+.mp-detail-goal,
+.mp-attention-placeholder {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+}
+
+.mp-detail-grid dt,
+.mp-detail-goal span {
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.mp-detail-grid dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.mp-attention-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
 .mp-timeline__list {
   display: grid;
   overflow: hidden;
@@ -1143,7 +1194,8 @@ kbd {
   }
 
   .mp-card-grid,
-  .mp-side-column {
+  .mp-side-column,
+  .mp-detail-grid {
     grid-template-columns: 1fr;
   }
 }

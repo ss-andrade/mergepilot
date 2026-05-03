@@ -99,6 +99,14 @@ function getStatusTone(status: Workstream["status"]) {
   return "muted";
 }
 
+function deriveTitleFromGoal(goal: string) {
+  const normalized = goal.trim().replace(/\s+/g, " ");
+  if (!normalized) return "";
+  const sentence = normalized.split(/[.!?]/)[0]?.trim() || normalized;
+  const concise = sentence.split(/\s+(?:with|for|to|so that)\s+/i)[0]?.trim() || sentence;
+  return concise.length > 32 ? `${concise.slice(0, 29).trim()}...` : concise;
+}
+
 function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="mp-kbd">{children}</kbd>;
 }
@@ -243,6 +251,18 @@ export function App() {
     void createWorkstream(formState);
   }
 
+  function updateGoalPrompt(goal: string) {
+    setFormState((current) => {
+      const previousDerived = deriveTitleFromGoal(current.goal);
+      const shouldDeriveTitle = !current.title.trim() || current.title === previousDerived;
+      return {
+        ...current,
+        goal,
+        title: shouldDeriveTitle ? deriveTitleFromGoal(goal) : current.title
+      };
+    });
+  }
+
   const commandActions = useMemo(
     () => [
       {
@@ -350,7 +370,7 @@ export function App() {
             </Button>
             <div>
               <p className="mp-eyebrow">Local-first workspace</p>
-              <h2>{selectedWorkstream?.title ?? "MergePilot app shell"}</h2>
+              <h2>{selectedWorkstream?.title ?? "Workstream workspace"}</h2>
             </div>
           </div>
           <div className="mp-topbar__actions">
@@ -367,14 +387,14 @@ export function App() {
                 <PlusIcon aria-hidden="true" />
                 New Workstream
               </DialogTrigger>
-              <NewWorkstreamDialog formState={formState} setFormState={setFormState} onSubmit={submitWorkstream} />
+              <NewWorkstreamDialog formState={formState} setFormState={setFormState} onGoalChange={updateGoalPrompt} onSubmit={submitWorkstream} />
             </Dialog>
           </div>
         </header>
 
         {error ? <p className="mp-error" role="alert">{error}</p> : null}
 
-        <section className="mp-hero" aria-label="Current workstream summary">
+        <section className="mp-hero" aria-label="Current workstream overview">
           <div className="mp-hero__copy">
             <Badge tone={isRunning ? "success" : "warning"}>
               <span className={`mp-status-dot${isRunning ? "" : " is-idle"}`} aria-hidden="true" />
@@ -405,7 +425,7 @@ export function App() {
                 Refresh
               </Button>
             </div>
-            <div className="mp-card-grid">
+            <div className="mp-card-grid" role="region" aria-label="Workstream list">
               {workstreams.length > 0
                 ? workstreams.map((workstream) => (
                     <Card className="mp-workstream-card" key={workstream.id}>
@@ -417,10 +437,10 @@ export function App() {
                       <p>{workstream.summary ?? workstream.goal}</p>
                       <code>{workstream.repo}</code>
                       <div className="mp-card__footer">
-                        <Button variant="outline" onClick={() => void selectWorkstream(workstream.id)}>
+                        <Button aria-label={`View timeline for ${workstream.title}`} variant="outline" onClick={() => void selectWorkstream(workstream.id)}>
                           View timeline
                         </Button>
-                        <Button variant="ghost" onClick={() => void appendTimelineEvent(workstream.id)}>
+                        <Button aria-label={`Add event to ${workstream.title}`} variant="ghost" onClick={() => void appendTimelineEvent(workstream.id)}>
                           Add event
                         </Button>
                       </div>
@@ -435,6 +455,57 @@ export function App() {
                     </Card>
                   ))}
             </div>
+
+            <Panel className="mp-workstream-detail" role="region" aria-label="Workstream detail">
+              {selectedWorkstream ? (
+                <>
+                  <div className="mp-section-heading">
+                    <div>
+                      <p className="mp-eyebrow">Workstream detail page</p>
+                      <h3>{selectedWorkstream.title}</h3>
+                    </div>
+                    <Badge tone={getStatusTone(selectedWorkstream.status)}>{selectedWorkstream.status}</Badge>
+                  </div>
+                  <p className="mp-detail-summary">{selectedWorkstream.summary ?? selectedWorkstream.goal}</p>
+                  <dl className="mp-detail-grid">
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{selectedWorkstream.status}</dd>
+                    </div>
+                    <div>
+                      <dt>Repository</dt>
+                      <dd>{selectedWorkstream.repo}</dd>
+                    </div>
+                    <div>
+                      <dt>Created by</dt>
+                      <dd>{selectedWorkstream.createdBy}</dd>
+                    </div>
+                    <div>
+                      <dt>Updated</dt>
+                      <dd>{formatDate(selectedWorkstream.updatedAt)}</dd>
+                    </div>
+                  </dl>
+                  <div className="mp-detail-goal">
+                    <span>Goal prompt</span>
+                    <p>{selectedWorkstream.goal}</p>
+                  </div>
+                  <div className="mp-card__footer">
+                    <Button variant="outline" onClick={() => void appendTimelineEvent(selectedWorkstream.id)}>
+                      Add event
+                    </Button>
+                    <Button variant="ghost" onClick={() => void refreshOrchestrator(selectedWorkstream.id)}>
+                      Refresh detail
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <div className="mp-empty-state">
+                  <WorkflowIcon aria-hidden="true" />
+                  <strong>Select a workstream</strong>
+                  <p>Create or select a workstream to inspect status, summary, goal, and repository context.</p>
+                </div>
+              )}
+            </Panel>
 
             <Panel className="mp-timeline" id="timeline" aria-label="Event timeline">
               <div className="mp-section-heading">
@@ -464,8 +535,8 @@ export function App() {
                 ) : (
                   <div className="mp-empty-state">
                     <CheckCircle2Icon aria-hidden="true" />
-                    <strong>Awaiting persisted events</strong>
-                    <p>Create a workstream to append and read local timeline data.</p>
+                    <strong>No events yet</strong>
+                    <p>This workstream timeline is ready for coordinator messages, plan updates, commands, and PR evidence.</p>
                   </div>
                 )}
               </div>
@@ -473,6 +544,19 @@ export function App() {
           </section>
 
           <aside className="mp-side-column" id="agents">
+            <Panel className="mp-human-attention" role="region" aria-label="Human attention">
+              <p className="mp-eyebrow">Human attention</p>
+              <h3>Plan approvals, blockers, and access requests</h3>
+              <p>
+                MergePilot will surface decisions that need a human before agents continue: plan approval,
+                credentials/access requests, failed checks, and merge readiness.
+              </p>
+              <div className="mp-attention-placeholder">
+                <BellIcon aria-hidden="true" />
+                <span>No human action required right now.</span>
+              </div>
+            </Panel>
+
             <Panel className="mp-inspector">
               <p className="mp-eyebrow">Agent readiness</p>
               <h3>Operational lanes</h3>
@@ -545,10 +629,12 @@ function StatusLine({ icon, label, value }: { icon: ReactNode; label: string; va
 
 function NewWorkstreamDialog({
   formState,
+  onGoalChange,
   onSubmit,
   setFormState
 }: {
   formState: WorkstreamFormState;
+  onGoalChange: (goal: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   setFormState: (state: WorkstreamFormState) => void;
 }) {
@@ -561,23 +647,23 @@ function NewWorkstreamDialog({
         </DialogHeader>
         <DialogBody className="mp-form-grid">
           <div>
+            <Label htmlFor="workstream-goal">Goal prompt</Label>
+            <Textarea
+              id="workstream-goal"
+              onChange={(event) => onGoalChange(event.target.value)}
+              placeholder="What should agents coordinate, verify, and report?"
+              required
+              rows={4}
+              value={formState.goal}
+            />
+          </div>
+          <div>
             <Label htmlFor="workstream-title">Title</Label>
             <Input
               id="workstream-title"
               onChange={(event) => setFormState({ ...formState, title: event.target.value })}
-              placeholder="Ship queued review fixes"
-              required
+              placeholder="Derived from the goal, editable before creation"
               value={formState.title}
-            />
-          </div>
-          <div>
-            <Label htmlFor="workstream-goal">Goal</Label>
-            <Textarea
-              id="workstream-goal"
-              onChange={(event) => setFormState({ ...formState, goal: event.target.value })}
-              placeholder="What should agents coordinate, verify, and report?"
-              rows={4}
-              value={formState.goal}
             />
           </div>
           <div>
