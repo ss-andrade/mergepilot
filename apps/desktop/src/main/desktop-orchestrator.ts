@@ -1,5 +1,5 @@
 import { CodexAdapter } from "@mergepilot/codex-adapter";
-import { createLocalOrchestrator } from "@mergepilot/orchestrator";
+import { GitHubCliPullRequestPublisher, createLocalOrchestrator } from "@mergepilot/orchestrator";
 import type {
   BuildAgentRunnerOptions,
   LocalOrchestratorOptions,
@@ -15,7 +15,8 @@ export function createDesktopOrchestratorOptions(
 ): LocalOrchestratorOptions {
   return {
     ...options,
-    buildAgentAdapter: options.buildAgentAdapter ?? new CodexAdapter()
+    buildAgentAdapter: options.buildAgentAdapter ?? new CodexAdapter(),
+    pullRequestPublisher: options.pullRequestPublisher ?? new GitHubCliPullRequestPublisher()
   };
 }
 

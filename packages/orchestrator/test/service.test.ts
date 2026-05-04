@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLocalOrchestrator } from "../src/index.js";
-import { deriveGitHubPullRequestReviewResult } from "../src/service.js";
+import { GitHubCliPullRequestPublisher, deriveGitHubPullRequestReviewResult } from "../src/service.js";
 
 const tempDirs: string[] = [];
 
@@ -751,6 +751,314 @@ describe("LocalOrchestratorService", () => {
     });
 
     await orchestrator.stop();
+  });
+
+  it("publishes completed build-agent changes through git and GitHub CLI", async () => {
+    const dataDir = await createTempDir();
+    const workspacePath = path.join(dataDir, "workspace");
+    const commands: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const pullRequestPublisher = new GitHubCliPullRequestPublisher({
+      command: async (command, args, options) => {
+        commands.push({ command, args, cwd: options.cwd });
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { stdout: " M packages/orchestrator/src/service.ts\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url origin") {
+          return { stdout: "git@github.com:ss-andrade/mergepilot.git\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url --push --all origin") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot.git\n" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
+          return { stdout: "abc123def456\n" };
+        }
+        if (command === "gh" && args[0] === "pr" && args[1] === "create") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot/pull/42\n" };
+        }
+        return { stdout: "" };
+      }
+    });
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Real PR",
+      goal: "Publish real build-agent work.",
+      repo: "ss-andrade/mergepilot",
+      githubRepository: { owner: "ss-andrade", name: "mergepilot", defaultBranch: "main" },
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = orchestrator.createAgentRun({
+      workstreamId: workstream.id,
+      planId: plan.id,
+      providerId: "codex",
+      role: "build",
+      status: "completed",
+      goal: workstream.goal,
+      workspacePath,
+      branchName: `mergepilot/${workstream.id}/build/run-1`
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "awaiting_review");
+
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(pullRequest).toMatchObject({
+      branchName: run.branchName,
+      commitSha: "abc123def456",
+      prNumber: 42,
+      prUrl: "https://github.com/ss-andrade/mergepilot/pull/42",
+      status: "open"
+    });
+    expect(commands.map((entry) => [entry.command, entry.args])).toEqual([
+      ["git", ["status", "--porcelain"]],
+      ["git", ["remote", "get-url", "origin"]],
+      ["git", ["remote", "get-url", "--push", "--all", "origin"]],
+      ["gh", ["auth", "status"]],
+      ["git", ["checkout", "-B", run.branchName]],
+      ["git", ["add", "-A"]],
+      ["git", ["commit", "-m", "Real PR: build-agent changes", "-m", expect.stringContaining(workstream.id)]],
+      ["git", ["rev-parse", "HEAD"]],
+      ["git", ["push", "--set-upstream", "origin", run.branchName]],
+      ["gh", ["pr", "create", "--repo", "ss-andrade/mergepilot", "--base", "main", "--head", run.branchName, "--title", "Real PR: build-agent changes", "--body", expect.stringContaining(workstream.id)]]
+    ]);
+    expect(commands.every((entry) => entry.cwd === workspacePath)).toBe(true);
+
+    await orchestrator.stop();
+  });
+
+  it("records no-change real publisher runs as failed pull requests requiring human action", async () => {
+    const dataDir = await createTempDir();
+    const pullRequestPublisher = new GitHubCliPullRequestPublisher({
+      command: async () => ({ stdout: "" })
+    });
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "No changes",
+      goal: "Do not publish empty work.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = orchestrator.createAgentRun({
+      workstreamId: workstream.id,
+      planId: plan.id,
+      providerId: "codex",
+      role: "build",
+      status: "completed",
+      goal: workstream.goal,
+      workspacePath: path.join(dataDir, "workspace"),
+      branchName: `mergepilot/${workstream.id}/build/run-1`
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "awaiting_review");
+
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(pullRequest).toMatchObject({
+      status: "failed",
+      branchName: run.branchName,
+      prNumber: null,
+      prUrl: null,
+      errorMessage: expect.stringMatching(/no file changes/i)
+    });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({ status: "awaiting_user_input" });
+
+    await orchestrator.stop();
+  });
+
+  it("surfaces missing GitHub CLI authentication as a real publisher failure", async () => {
+    const dataDir = await createTempDir();
+    const pullRequestPublisher = new GitHubCliPullRequestPublisher({
+      command: async (command, args) => {
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { stdout: " M README.md\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url origin") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot.git\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url --push --all origin") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot.git\n" };
+        }
+        if (command === "gh" && args.join(" ") === "auth status") {
+          throw new Error("gh auth status failed");
+        }
+        return { stdout: "" };
+      }
+    });
+    const orchestrator = createLocalOrchestrator({ dataDir, pullRequestPublisher });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Auth failure",
+      goal: "Surface GitHub auth failures.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+    const run = orchestrator.createAgentRun({
+      workstreamId: workstream.id,
+      planId: plan.id,
+      providerId: "codex",
+      role: "build",
+      status: "completed",
+      goal: workstream.goal,
+      workspacePath: path.join(dataDir, "workspace"),
+      branchName: `mergepilot/${workstream.id}/build/run-1`
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "awaiting_review");
+
+    const pullRequest = await orchestrator.openPullRequest({ workstreamId: workstream.id, agentRunId: run.id });
+
+    expect(pullRequest).toMatchObject({
+      status: "failed",
+      errorMessage: expect.stringContaining("gh auth status failed")
+    });
+
+    await orchestrator.stop();
+  });
+
+  it("refuses to publish when the workspace origin does not match the selected repository", async () => {
+    const publisher = new GitHubCliPullRequestPublisher({
+      command: async (command, args) => {
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { stdout: " M README.md\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url origin") {
+          return { stdout: "git@github.com:someone-else/wrong-repo.git\n" };
+        }
+        throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+      }
+    });
+
+    await expect(publisher.openPullRequest({
+      workstream: {
+        id: "ws-1",
+        title: "Wrong origin",
+        goal: "Validate workspace remote.",
+        status: "awaiting_review",
+        repo: "ss-andrade/mergepilot",
+        githubRepository: { owner: "ss-andrade", name: "mergepilot", defaultBranch: "main" },
+        createdBy: "hermes",
+        summary: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      agentRun: {
+        id: "run-1",
+        workstreamId: "ws-1",
+        planId: null,
+        providerId: "codex",
+        adapterId: "codex",
+        role: "build",
+        status: "completed",
+        goal: "Validate workspace remote.",
+        workspacePath: "/tmp/workspace",
+        branchName: "mergepilot/ws-1/build/run-1",
+        summary: null,
+        startedAt: null,
+        completedAt: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      title: "Wrong origin",
+      body: "Body"
+    })).rejects.toThrow(/workspace origin/i);
+  });
+
+  it("refuses to publish when the workspace push origin does not match the selected repository", async () => {
+    const publisher = new GitHubCliPullRequestPublisher({
+      command: async (command, args) => {
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { stdout: " M README.md\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url origin") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot.git\n" };
+        }
+        if (command === "git" && args.join(" ") === "remote get-url --push --all origin") {
+          return { stdout: "https://github.com/ss-andrade/mergepilot.git\nssh://git@evil.example.com/some/repo.git\n" };
+        }
+        throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+      }
+    });
+
+    await expect(publisher.openPullRequest({
+      workstream: {
+        id: "ws-1",
+        title: "Wrong push origin",
+        goal: "Validate workspace push remote.",
+        status: "awaiting_review",
+        repo: "ss-andrade/mergepilot",
+        githubRepository: { owner: "ss-andrade", name: "mergepilot", defaultBranch: "main" },
+        createdBy: "hermes",
+        summary: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      agentRun: {
+        id: "run-1",
+        workstreamId: "ws-1",
+        planId: null,
+        providerId: "codex",
+        adapterId: "codex",
+        role: "build",
+        status: "completed",
+        goal: "Validate workspace push remote.",
+        workspacePath: "/tmp/workspace",
+        branchName: "mergepilot/ws-1/build/run-1",
+        summary: null,
+        startedAt: null,
+        completedAt: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      title: "Wrong push origin",
+      body: "Body"
+    })).rejects.toThrow(/push origin/i);
+  });
+
+  it("validates repository scope and branch metadata before real publishing", async () => {
+    const publisher = new GitHubCliPullRequestPublisher({
+      command: vi.fn(async () => ({ stdout: "" }))
+    });
+
+    await expect(publisher.openPullRequest({
+      workstream: {
+        id: "ws-1",
+        title: "Bad scope",
+        goal: "Validate repository metadata.",
+        status: "awaiting_review",
+        repo: "ss-andrade/mergepilot",
+        githubRepository: { owner: "other", name: "mergepilot", defaultBranch: "main" },
+        createdBy: "hermes",
+        summary: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      agentRun: {
+        id: "run-1",
+        workstreamId: "ws-1",
+        planId: null,
+        providerId: "codex",
+        adapterId: "codex",
+        role: "build",
+        status: "completed",
+        goal: "Validate repository metadata.",
+        workspacePath: "/tmp/workspace",
+        branchName: "mergepilot/ws-1/build/run-1",
+        summary: null,
+        startedAt: null,
+        completedAt: null,
+        createdAt: "2026-05-04T00:00:00.000Z",
+        updatedAt: "2026-05-04T00:00:00.000Z"
+      },
+      title: "Bad scope",
+      body: "Body"
+    })).rejects.toThrow(/connected GitHub repository/i);
   });
 
   it("keeps active build-agent runs lifecycle-safe until they settle", async () => {
