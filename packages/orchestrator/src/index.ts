@@ -7,6 +7,9 @@ export {
   InProcessLocalOrchestrator
 } from "./service.js";
 export type {
+  LocalOrchestratorOptions
+} from "./service.js";
+export type {
   AgentRun,
   AgentRunStatus,
   AppendWorkstreamEventInput,
