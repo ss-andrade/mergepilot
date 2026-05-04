@@ -7,11 +7,12 @@
     "dev": "concurrently -k -n renderer,electron -c cyan,magenta \"npm run dev -w @mergepilot/web\" \"npm run dev:electron\"",
     "dev:electron": "npm run build:main && wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "build": "npm run build:main",
-    "build:main": "npm run build -w @mergepilot/orchestrator && tsc -b tsconfig.json --force",
-    "typecheck": "npm run build -w @mergepilot/orchestrator && tsc -p tsconfig.json --noEmit",
+    "build:main": "npm run build -w @mergepilot/agents && npm run build -w @mergepilot/orchestrator && npm run build -w @mergepilot/codex-adapter && tsc -b tsconfig.json --force",
+    "typecheck": "npm run build -w @mergepilot/agents && npm run build -w @mergepilot/orchestrator && npm run build -w @mergepilot/codex-adapter && tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@mergepilot/codex-adapter": "0.0.0",
     "@mergepilot/orchestrator": "0.0.0",
     "@mergepilot/web": "0.0.0"
   },

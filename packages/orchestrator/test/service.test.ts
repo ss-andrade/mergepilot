@@ -265,6 +265,70 @@ describe("LocalOrchestratorService", () => {
     await orchestrator.stop();
   });
 
+  it("surfaces build-agent adapter failures as human action instead of fake success", async () => {
+    const dataDir = await createTempDir();
+    const orchestrator = createLocalOrchestrator({
+      dataDir,
+      buildAgentAdapter: {
+        metadata: {
+          providerId: "codex",
+          adapterId: "codex",
+          displayName: "OpenAI Codex",
+          capabilities: {
+            streamingEvents: true,
+            cancellation: true,
+            structuredResults: false,
+            sessionResume: false
+          }
+        },
+        detect: async () => ({ providerId: "codex", status: "available", checkedAt: "2026-05-04T00:00:00.000Z" }),
+        health: async () => ({ providerId: "codex", status: "degraded", checkedAt: "2026-05-04T00:00:00.000Z" }),
+        run: vi.fn(async () => {
+          throw new Error("Codex CLI is not authenticated.");
+        })
+      }
+    });
+    await orchestrator.start();
+    const workstream = orchestrator.createWorkstream({
+      title: "Codex failure",
+      goal: "Surface Codex execution failures.",
+      repo: "ss-andrade/mergepilot",
+      createdBy: "hermes"
+    });
+    orchestrator.updateWorkstreamStatus(workstream.id, "planning");
+    const plan = orchestrator.proposePlan({ workstreamId: workstream.id });
+    orchestrator.approvePlan({ workstreamId: workstream.id, planId: plan.id });
+
+    const run = await orchestrator.startBuildAgentRun({ workstreamId: workstream.id });
+
+    expect(run).toMatchObject({
+      providerId: "codex",
+      adapterId: "codex",
+      status: "failed",
+      summary: "Codex CLI is not authenticated."
+    });
+    expect(orchestrator.getWorkstream(workstream.id)).toMatchObject({
+      status: "awaiting_user_input",
+      summary: "Codex CLI is not authenticated."
+    });
+    expect(orchestrator.listEvents(workstream.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "human_action_required",
+          message: "Build agent run failed.",
+          payload: expect.objectContaining({ runId: run.id, errorMessage: "Codex CLI is not authenticated." })
+        })
+      ])
+    );
+    expect(orchestrator.listEvents(workstream.id)).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "agent_completed", payload: expect.objectContaining({ runId: run.id }) })
+      ])
+    );
+
+    await orchestrator.stop();
+  });
+
   it("opens a pull request from a completed build-agent run and links it to the timeline", async () => {
     const dataDir = await createTempDir();
     const pullRequestPublisher = {

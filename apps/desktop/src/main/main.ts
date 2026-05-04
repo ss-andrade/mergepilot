@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
-import { createLocalOrchestrator } from "@mergepilot/orchestrator";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createDesktopOrchestrator } from "./desktop-orchestrator.js";
 import { registerOrchestratorIpcHandlers } from "./orchestrator-ipc.js";
 
 const rendererDevServerUrl = process.env.VITE_DEV_SERVER_URL;
@@ -36,7 +36,7 @@ if (userDataDirOverride) {
   app.setPath("userData", userDataDirOverride);
 }
 
-const orchestrator = createLocalOrchestrator({
+const orchestrator = createDesktopOrchestrator({
   dataDir: path.join(app.getPath("userData"), "orchestrator")
 });
 
