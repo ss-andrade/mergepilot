@@ -10,6 +10,14 @@ npm run verify
 
 This runs workspace typechecks, unit tests, and smoke checks. It does not start Playwright or Electron.
 
+The dogfood workflow has an additional local readiness preflight:
+
+```sh
+node scripts/preflight-dogfood.mjs /absolute/path/to/target-repo
+```
+
+Use it before running the MVP loop from [`docs/dogfood.md`](dogfood.md). It checks local Codex, Git, GitHub CLI auth, GitHub `origin`, writable worktree access, and Electron Linux dependencies where applicable.
+
 ## Runtime Harness
 
 ```sh
