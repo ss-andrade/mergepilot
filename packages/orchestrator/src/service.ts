@@ -45,6 +45,25 @@ export interface LocalOrchestratorOptions extends BuildAgentRunnerOptions {
   dataDir: string;
 }
 
+export interface GitHubCliPullRequestPublisherOptions {
+  command?: GitHubCliCommandExecutor;
+}
+
+export interface GitHubCliCommandOptions {
+  cwd: string;
+}
+
+export interface GitHubCliCommandResult {
+  stdout: string;
+  stderr?: string;
+}
+
+export type GitHubCliCommandExecutor = (
+  command: string,
+  args: string[],
+  options: GitHubCliCommandOptions
+) => Promise<GitHubCliCommandResult>;
+
 export class InProcessLocalOrchestrator implements LocalOrchestratorService {
   private store: OrchestratorStore | null = null;
   private readonly databasePath: string;
@@ -504,6 +523,181 @@ class DeterministicPullRequestPublisher implements PullRequestPublisher {
       prUrl: `https://github.com/${safeOwner}/${safeName}/pull/${prNumber}`
     };
   }
+}
+
+export class GitHubCliPullRequestPublisher implements PullRequestPublisher {
+  private readonly command: GitHubCliCommandExecutor;
+
+  constructor(options: GitHubCliPullRequestPublisherOptions = {}) {
+    this.command = options.command ?? execPublisherCommand;
+  }
+
+  async openPullRequest(input: Parameters<PullRequestPublisher["openPullRequest"]>[0]): Promise<{ branchName: string; commitSha: string; prNumber: number; prUrl: string }> {
+    const repo = requirePublishRepository(input.workstream);
+    const branchName = requirePublishBranch(input.agentRun.branchName);
+    const workspacePath = requirePublishWorkspace(input.agentRun.workspacePath);
+    const baseBranch = requirePublishBaseBranch(input.workstream.githubRepository?.defaultBranch ?? "main");
+    const title = boundedPublisherText(input.title, "Pull request title", 200);
+    const body = boundedPublisherText(input.body, "Pull request body", 4000);
+
+    const status = await this.run("inspect workspace changes", "git", ["status", "--porcelain"], workspacePath);
+    if (!status.stdout.trim()) {
+      throw new Error("No file changes were found in the build-agent workspace; no pull request was published.");
+    }
+    const origin = await this.run("verify workspace origin", "git", ["remote", "get-url", "origin"], workspacePath);
+    const originRepo = normalizeGitHubRemote(origin.stdout.trim());
+    if (originRepo !== repo) {
+      throw new Error("Build-agent workspace origin does not match the selected GitHub repository; no pull request was published.");
+    }
+    const pushOrigin = await this.run("verify workspace push origin", "git", ["remote", "get-url", "--push", "--all", "origin"], workspacePath);
+    const pushRepos = pushOrigin.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => normalizeGitHubRemote(line));
+    if (pushRepos.length === 0 || pushRepos.some((pushRepo) => pushRepo !== repo)) {
+      throw new Error("Build-agent workspace push origin does not match the selected GitHub repository; no pull request was published.");
+    }
+
+    await this.run("verify GitHub CLI authentication", "gh", ["auth", "status"], workspacePath);
+    await this.run("create build-agent branch", "git", ["checkout", "-B", branchName], workspacePath);
+    await this.run("stage build-agent changes", "git", ["add", "-A"], workspacePath);
+    await this.run("commit build-agent changes", "git", ["commit", "-m", title, "-m", body], workspacePath);
+    const commit = await this.run("read published commit SHA", "git", ["rev-parse", "HEAD"], workspacePath);
+    const commitSha = commit.stdout.trim();
+    if (!/^[A-Fa-f0-9]{7,64}$/.test(commitSha)) {
+      throw new Error("Git did not return a valid commit SHA after committing build-agent changes.");
+    }
+    await this.run("push build-agent branch", "git", ["push", "--set-upstream", "origin", branchName], workspacePath);
+    const created = await this.run("create GitHub pull request", "gh", [
+      "pr",
+      "create",
+      "--repo",
+      repo,
+      "--base",
+      baseBranch,
+      "--head",
+      branchName,
+      "--title",
+      title,
+      "--body",
+      body
+    ], workspacePath);
+    const pullRequest = parsePullRequestCreateOutput(created.stdout);
+
+    return {
+      branchName,
+      commitSha,
+      prNumber: pullRequest.prNumber,
+      prUrl: pullRequest.prUrl
+    };
+  }
+
+  private async run(action: string, command: string, args: string[], cwd: string): Promise<GitHubCliCommandResult> {
+    try {
+      return await this.command(command, args, { cwd });
+    } catch (error) {
+      throw new Error(`Failed to ${action}: ${publisherErrorMessage(error)}`);
+    }
+  }
+}
+
+async function execPublisherCommand(command: string, args: string[], options: GitHubCliCommandOptions): Promise<GitHubCliCommandResult> {
+  const { stdout, stderr } = await execFileAsync(command, args, {
+    cwd: options.cwd,
+    timeout: 120000,
+    maxBuffer: 1024 * 1024
+  });
+  return { stdout, stderr };
+}
+
+function requirePublishRepository(workstream: Parameters<PullRequestPublisher["openPullRequest"]>[0]["workstream"]): string {
+  const repo = repositorySlug(workstream.repo);
+  if (!repo) {
+    throw new Error("Workstream repository must be a GitHub owner/name slug before publishing a pull request.");
+  }
+  if (workstream.githubRepository) {
+    const scopedRepo = repositorySlug(`${workstream.githubRepository.owner}/${workstream.githubRepository.name}`);
+    if (scopedRepo !== repo) {
+      throw new Error("Workstream repository does not match the connected GitHub repository scope.");
+    }
+    requirePublishBaseBranch(workstream.githubRepository.defaultBranch);
+  }
+  return repo;
+}
+
+function normalizeGitHubRemote(remoteUrl: string): string | null {
+  const url = remoteUrl.trim().replace(/\.git$/, "");
+  const https = url.match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (https) {
+    return `${https[1]}/${https[2]}`;
+  }
+  const ssh = url.match(/^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (ssh) {
+    return `${ssh[1]}/${ssh[2]}`;
+  }
+  const sshUrl = url.match(/^ssh:\/\/git@github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (sshUrl) {
+    return `${sshUrl[1]}/${sshUrl[2]}`;
+  }
+  return null;
+}
+
+function requirePublishBranch(branchName: string | null): string {
+  const branch = branchName?.trim();
+  if (!branch || branch.length > 200 || !/^[A-Za-z0-9._/-]+$/.test(branch) || branch.startsWith("/") || branch.endsWith("/") || branch.includes("..")) {
+    throw new Error("Completed build-agent run must include valid branch metadata before publishing a pull request.");
+  }
+  return branch;
+}
+
+function requirePublishWorkspace(workspacePath: string | null): string {
+  const workspace = workspacePath?.trim();
+  if (!workspace) {
+    throw new Error("Completed build-agent run must include a workspace path before publishing a pull request.");
+  }
+  return workspace;
+}
+
+function requirePublishBaseBranch(baseBranch: string): string {
+  const branch = baseBranch.trim();
+  if (!branch || branch.length > 200 || !/^[A-Za-z0-9._/-]+$/.test(branch) || branch.startsWith("/") || branch.endsWith("/") || branch.includes("..")) {
+    throw new Error("A valid GitHub base branch is required before publishing a pull request.");
+  }
+  return branch;
+}
+
+function boundedPublisherText(value: string, label: string, maxLength: number): string {
+  const text = value.trim();
+  if (!text) {
+    throw new Error(`${label} cannot be empty.`);
+  }
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function parsePullRequestCreateOutput(stdout: string): { prNumber: number; prUrl: string } {
+  const output = stdout.trim();
+  try {
+    const data = JSON.parse(output) as { number?: unknown; url?: unknown };
+    const prNumber = Number(data.number);
+    const prUrl = typeof data.url === "string" ? data.url : "";
+    if (Number.isInteger(prNumber) && prNumber > 0 && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(prUrl)) {
+      return { prNumber, prUrl };
+    }
+  } catch {
+    const url = output.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)/);
+    if (url?.[0] && url[1]) {
+      return { prNumber: Number(url[1]), prUrl: url[0] };
+    }
+  }
+  throw new Error("GitHub CLI did not return pull request number and URL.");
+}
+
+function publisherErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+  return String(error);
 }
 
 function deterministicPullRequestNumber(workstreamId: string, agentRunId: string): number {

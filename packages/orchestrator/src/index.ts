@@ -4,9 +4,14 @@ export {
 } from "./sqlite-store.js";
 export {
   createLocalOrchestrator,
+  GitHubCliPullRequestPublisher,
   InProcessLocalOrchestrator
 } from "./service.js";
 export type {
+  GitHubCliCommandExecutor,
+  GitHubCliCommandOptions,
+  GitHubCliCommandResult,
+  GitHubCliPullRequestPublisherOptions,
   LocalOrchestratorOptions
 } from "./service.js";
 export type {

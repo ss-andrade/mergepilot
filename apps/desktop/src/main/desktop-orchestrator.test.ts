@@ -13,9 +13,10 @@ describe("desktop orchestrator construction", () => {
       }
     });
     expect(options.buildAgentAdapter?.run).toEqual(expect.any(Function));
+    expect(options.pullRequestPublisher?.constructor.name).toBe("GitHubCliPullRequestPublisher");
   });
 
-  it("preserves deterministic adapter overrides for tests", () => {
+  it("preserves deterministic adapter and publisher overrides for tests", () => {
     const fakeAdapter = {
       metadata: {
         providerId: "fake-agent",
@@ -34,12 +35,22 @@ describe("desktop orchestrator construction", () => {
         throw new Error("not used");
       }
     };
+    const fakePublisher = {
+      openPullRequest: async () => ({
+        branchName: "mergepilot/ws/build/run",
+        commitSha: "abc123",
+        prNumber: 1,
+        prUrl: "https://github.com/ss-andrade/mergepilot/pull/1"
+      })
+    };
 
     const options = createDesktopOrchestratorOptions({
       dataDir: "/tmp/mergepilot",
-      buildAgentAdapter: fakeAdapter
+      buildAgentAdapter: fakeAdapter,
+      pullRequestPublisher: fakePublisher
     });
 
     expect(options.buildAgentAdapter).toBe(fakeAdapter);
+    expect(options.pullRequestPublisher).toBe(fakePublisher);
   });
 });
