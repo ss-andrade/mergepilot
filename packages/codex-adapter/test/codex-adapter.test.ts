@@ -110,7 +110,7 @@ describe("CodexAdapter", () => {
     expect(runner.requests[0]?.collectDiff).toBeUndefined();
     expect(runner.requests[2]).toMatchObject({
       cwd: "/tmp/repo",
-      args: ["exec", "--sandbox", "read-only", "Reply with OK only."],
+      args: ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "Reply with OK only."],
       timeoutMs: 30000,
     });
     expect(runner.requests[2]?.collectDiff).toBeUndefined();
@@ -208,7 +208,7 @@ describe("CodexAdapter", () => {
       args: [
         "exec",
         "--sandbox",
-        "workspace-write",
+        "danger-full-access",
         "--model",
         "gpt-5.2",
         "Implement issue 13.\n\nKeep changes focused.",
@@ -224,7 +224,7 @@ describe("CodexAdapter", () => {
       summary: "Implemented the task.",
       metadata: {
         exitCode: 0,
-        sandbox: "workspace-write",
+        sandbox: "danger-full-access",
         cancelled: false,
         diffTruncated: true,
       },
@@ -236,7 +236,7 @@ describe("CodexAdapter", () => {
           type: "command",
           cwd: "/tmp/workspace",
           command:
-            'codex exec --sandbox workspace-write --model gpt-5.2 "[redacted]"',
+            'codex exec --sandbox danger-full-access --model gpt-5.2 "[redacted]"',
         }),
         expect.objectContaining({
           type: "artifact",
@@ -322,7 +322,7 @@ describe("CodexAdapter", () => {
     expect(commandEvent).toMatchObject({
       type: "command",
       command:
-        'codex exec --sandbox workspace-write --token "[redacted]" "--api-key=[redacted]" "[redacted]"',
+        'codex exec --sandbox danger-full-access --token "[redacted]" "--api-key=[redacted]" "[redacted]"',
     });
     expect(commandEvent).not.toMatchObject({
       command: expect.stringContaining("secret"),

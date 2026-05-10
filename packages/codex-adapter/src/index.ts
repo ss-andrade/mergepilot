@@ -40,11 +40,12 @@ export interface CodexAdapterOptions {
 }
 
 const PROVIDER_ID = "codex";
-const DEFAULT_SANDBOX = "workspace-write";
+const DEFAULT_SANDBOX = "danger-full-access";
 const DEFAULT_DETECT_TIMEOUT_MS = 5_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 30_000;
 const DEFAULT_DIFF_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
+const DEFAULT_ARGS = ["--skip-git-repo-check"] as const;
 const REDACTED = "[redacted]";
 const SENSITIVE_ARG_NAMES = new Set([
   "--api-key",
@@ -68,7 +69,7 @@ export class CodexAdapter implements AgentAdapter {
   constructor(options: CodexAdapterOptions = {}) {
     this.#executable = options.executable ?? "codex";
     this.#sandbox = normalizeString(options.sandbox, DEFAULT_SANDBOX);
-    this.#defaultArgs = options.defaultArgs ?? [];
+    this.#defaultArgs = options.defaultArgs ?? DEFAULT_ARGS;
     this.#detectTimeoutMs = normalizePositiveInteger(
       options.detectTimeoutMs,
       DEFAULT_DETECT_TIMEOUT_MS,
@@ -173,7 +174,7 @@ export class CodexAdapter implements AgentAdapter {
 
     const result = await this.#runCli({
       command: this.#executable,
-      args: ["exec", "--sandbox", "read-only", "Reply with OK only."],
+      args: ["exec", "--sandbox", "read-only", ...this.#defaultArgs, "Reply with OK only."],
       cwd: input.cwd,
       env: input.env,
       timeoutMs: this.#healthTimeoutMs,

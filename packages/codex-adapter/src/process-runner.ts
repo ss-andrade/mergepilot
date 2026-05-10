@@ -64,6 +64,7 @@ export class SpawnCodexCliRunner implements CodexCliRunner {
         cwd: request.cwd,
         env: mergeEnv(request.env),
         signal: controller.signal,
+        stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
       const stdout: Buffer[] = [];
