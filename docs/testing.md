@@ -33,11 +33,13 @@ npm run verify:runtime
 
 `verify:runtime` runs both runtime suites and is intended for local pre-release checks or CI jobs that provision browser and Electron dependencies.
 
-On headless Linux, run Electron checks with a virtual display:
+On headless Linux, the Electron E2E suite is skipped when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. To run the suite, use a virtual X11 display:
 
 ```sh
 xvfb-run -a npm run test:e2e:electron
 ```
+
+You can also run `npm run test:e2e:electron` directly from an active X11 or Wayland desktop session.
 
 ## Linux Electron Preflight
 
