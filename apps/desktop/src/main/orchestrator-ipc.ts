@@ -83,6 +83,7 @@ export function registerOrchestratorIpcHandlers(
   options: { runDogfoodPreflight?: DogfoodPreflightRunner } = {}
 ): void {
   const runDogfoodPreflight = options.runDogfoodPreflight ?? defaultRunDogfoodPreflight;
+  const preflightReadinessByWorkstream = new Map<string, boolean>();
 
   ipc.handle("orchestrator:start", async () => {
     await orchestrator.start();
@@ -144,12 +145,17 @@ export function registerOrchestratorIpcHandlers(
   });
 
   ipc.handle("agents:start-build-run", (_event, rawInput) => {
-    return orchestrator.startBuildAgentRun(parseStartBuildAgentRunInput(rawInput));
+    const input = parseStartBuildAgentRunInput(rawInput);
+    if (preflightReadinessByWorkstream.get(input.workstreamId) !== true) {
+      throw new Error("Run and pass dogfood preflight before starting the build agent.");
+    }
+    return orchestrator.startBuildAgentRun(input);
   });
 
   ipc.handle("dogfood:preflight:run", async (_event, rawInput) => {
     const input = parseRunDogfoodPreflightInput(rawInput);
     const report = sanitizeDogfoodPreflightReport(await runDogfoodPreflight(input));
+    preflightReadinessByWorkstream.set(input.workstreamId, report.ok);
     await orchestrator.appendEvent({
       workstreamId: input.workstreamId,
       type: report.ok ? "command_ran" : "human_action_required",
@@ -476,10 +482,11 @@ function isJsonCompatible(value: unknown, seen: Set<object>): boolean {
 async function defaultRunDogfoodPreflight(input: RunDogfoodPreflightInput): Promise<DogfoodPreflightReport> {
   const scriptUrl = pathToFileURL(path.resolve(process.cwd(), "scripts/preflight-dogfood.mjs")).href;
   const module = await import(scriptUrl) as {
-    buildDogfoodPreflightReport(options: { cwd: string }): Promise<Omit<DogfoodPreflightReport, "ranAt">>;
+    buildDogfoodPreflightReport(options: { cwd: string; expectedRepo?: string }): Promise<Omit<DogfoodPreflightReport, "ranAt">>;
   };
   const report = await module.buildDogfoodPreflightReport({
-    cwd: resolvePreflightCwd(input.repo)
+    cwd: resolvePreflightCwd(input.repo),
+    expectedRepo: input.repo
   });
   return {
     ...report,

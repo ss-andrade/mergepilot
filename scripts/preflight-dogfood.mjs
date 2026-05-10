@@ -116,12 +116,39 @@ function githubAuthCheck(cwd, runner) {
   );
 }
 
-function originCheck(cwd, runner) {
+function normalizeGitHubRemote(remoteUrl) {
+  const url = sanitizeText(remoteUrl).trim().replace(/\.git$/, "");
+  const https = url.match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (https) return `${https[1]}/${https[2]}`;
+  const ssh = url.match(/^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (ssh) return `${ssh[1]}/${ssh[2]}`;
+  const sshUrl = url.match(/^ssh:\/\/git@github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i);
+  if (sshUrl) return `${sshUrl[1]}/${sshUrl[2]}`;
+  return null;
+}
+
+function normalizeRepoSlug(repo) {
+  const match = String(repo ?? "").trim().match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+function originCheck(cwd, runner, expectedRepo) {
   const result = runner("git", ["remote", "get-url", "origin"], { cwd });
   const remote = firstLine(result.stdout).trim();
+  const originRepo = normalizeGitHubRemote(remote);
+  const expected = normalizeRepoSlug(expectedRepo);
 
-  if (result.status === 0 && githubRemotePattern.test(remote)) {
+  if (result.status === 0 && originRepo && (!expected || originRepo.toLowerCase() === expected.toLowerCase())) {
     return pass("github-origin", "GitHub origin remote", sanitizeText(remote));
+  }
+
+  if (result.status === 0 && originRepo && expected) {
+    return fail(
+      "github-origin",
+      "GitHub origin remote",
+      `Origin remote points at ${originRepo}, not ${expected}.`,
+      "Open the matching local clone or reconnect the workstream to the repository that matches this worktree.",
+    );
   }
 
   return fail(
@@ -177,7 +204,7 @@ export async function buildDogfoodPreflightReport(options = {}) {
       remediation: "Install GitHub CLI and ensure `gh --version` succeeds.",
     }),
     githubAuthCheck(cwd, runner),
-    originCheck(cwd, runner),
+    originCheck(cwd, runner, options.expectedRepo),
     await writableWorktreeCheck(cwd, canWriteWorktree),
     normalizeElectronCheck(await electronPreflight(cwd)),
   ];

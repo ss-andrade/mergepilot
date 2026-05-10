@@ -146,4 +146,25 @@ describe("dogfood preflight", () => {
     assert.match(output, /\[redacted\]/);
     assert.match(output, /https:\/\/github\.com\/owner\/repo\.git/);
   });
+
+  it("fails when the GitHub origin does not match the expected repository", async () => {
+    const runner = fakeRunner({
+      "codex --version": success("codex-cli 1.0.0\n"),
+      "git --version": success("git version 2.44.0\n"),
+      "gh --version": success("gh version 2.71.0\n"),
+      "gh auth status": success("github.com\n"),
+      "git remote get-url origin": success("https://github.com/other/repo.git\n"),
+    });
+
+    const report = await buildDogfoodPreflightReport({
+      cwd: "/repo",
+      expectedRepo: "owner/repo",
+      runner: runner.run,
+      electronPreflight: async () => ({ status: "skip", detail: "Only required on Linux hosts." }),
+      canWriteWorktree: async () => true,
+    });
+
+    assert.equal(report.ok, false);
+    assert.match(formatDogfoodPreflightReport(report), /other\/repo, not owner\/repo/);
+  });
 });

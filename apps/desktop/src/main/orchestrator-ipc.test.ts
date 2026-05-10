@@ -193,7 +193,14 @@ describe("orchestrator IPC handlers", () => {
       }))
     };
 
-    registerOrchestratorIpcHandlers(ipc, orchestrator);
+    registerOrchestratorIpcHandlers(ipc, orchestrator, {
+      runDogfoodPreflight: vi.fn(async () => ({
+        ok: true,
+        cwd: "/tmp/mergepilot",
+        ranAt: "2026-05-10T00:00:00.000Z",
+        checks: [{ id: "git", label: "Git", status: "pass", detail: "git version 2.44.0" }]
+      }))
+    });
 
     await expect(ipc.invoke("orchestrator:start")).resolves.toMatchObject({ state: "running", dataDir: "/tmp/data" });
     await expect(
@@ -248,6 +255,12 @@ describe("orchestrator IPC handlers", () => {
     await expect(
       ipc.invoke("plans:reject", { workstreamId: "ws-1", planId: "plan-1", reason: "Needs edits." })
     ).resolves.toMatchObject({ id: "plan-1", status: "rejected" });
+    await expect(
+      ipc.invoke("dogfood:preflight:run", {
+        workstreamId: "ws-1",
+        repo: "ss-andrade/mergepilot"
+      })
+    ).resolves.toMatchObject({ ok: true });
     await expect(ipc.invoke("agents:start-build-run", { workstreamId: "ws-1" })).resolves.toMatchObject({
       id: "run-1",
       status: "completed",
@@ -454,5 +467,7 @@ describe("orchestrator IPC handlers", () => {
         })
       })
     );
+    await expect(ipc.invoke("agents:start-build-run", { workstreamId: "ws-1" })).rejects.toThrow(/preflight/i);
+    expect(orchestrator.startBuildAgentRun).not.toHaveBeenCalled();
   });
 });
