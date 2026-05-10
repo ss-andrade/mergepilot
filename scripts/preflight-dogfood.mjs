@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const githubRemotePattern = /github\.com[:/][^/\s]+\/[^/\s]+(?:\.git)?$/i;
+const secretPattern = /\b(?:ghp|github_pat|gho|ghu|ghs|ghr|sk|xox[baprs])_[A-Za-z0-9_=-]{8,}\b|(?:token|password|secret|authorization|credential)=\S+/gi;
 
 function defaultRunner(command, args, options = {}) {
   return spawnSync(command, args, {
@@ -19,25 +20,33 @@ function firstLine(value) {
   return String(value ?? "").split(/\r?\n/).find(Boolean) ?? "";
 }
 
+function sanitizeText(value) {
+  return String(value ?? "")
+    .replace(secretPattern, "[redacted]")
+    .replace(/^https:\/\/[^@\s]+@/i, "https://");
+}
+
 function pass(id, label, detail) {
-  return { id, label, status: "pass", detail };
+  return { id, label, status: "pass", detail: sanitizeText(detail) };
 }
 
 function fail(id, label, detail, remediation) {
-  return { id, label, status: "fail", detail, remediation };
+  return { id, label, status: "fail", detail: sanitizeText(detail), remediation: sanitizeText(remediation) };
 }
 
 function skip(id, label, detail) {
-  return { id, label, status: "skip", detail };
+  return { id, label, status: "skip", detail: sanitizeText(detail) };
 }
 
 function normalizeElectronCheck(check) {
-  const detail = check.detail ?? check.message ?? "Electron dependency check completed.";
+  const detail = sanitizeText(check.detail ?? check.message ?? "Electron dependency check completed.");
+  const remediation = check.remediation ? sanitizeText(check.remediation) : undefined;
   return {
     id: "electron-linux",
     label: "Electron Linux dependencies",
     ...check,
     detail,
+    ...(remediation ? { remediation } : {}),
   };
 }
 
@@ -112,7 +121,7 @@ function originCheck(cwd, runner) {
   const remote = firstLine(result.stdout).trim();
 
   if (result.status === 0 && githubRemotePattern.test(remote)) {
-    return pass("github-origin", "GitHub origin remote", remote.replace(/^https:\/\/[^@]+@/i, "https://"));
+    return pass("github-origin", "GitHub origin remote", sanitizeText(remote));
   }
 
   return fail(

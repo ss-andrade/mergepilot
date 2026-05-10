@@ -164,6 +164,28 @@ interface StartBuildAgentRunInput {
   planId?: string;
 }
 
+type DogfoodPreflightStatus = "pass" | "fail" | "skip" | "warning";
+
+interface DogfoodPreflightCheck {
+  id: string;
+  label: string;
+  status: DogfoodPreflightStatus;
+  detail: string;
+  remediation?: string;
+}
+
+interface DogfoodPreflightReport {
+  ok: boolean;
+  cwd: string;
+  checks: DogfoodPreflightCheck[];
+  ranAt: string;
+}
+
+interface RunDogfoodPreflightInput {
+  workstreamId: string;
+  repo: string;
+}
+
 interface PullRequest {
   id: string;
   workstreamId: string;
@@ -239,6 +261,9 @@ export interface MergePilotDesktopApi {
     startBuildRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
     listRuns(workstreamId: string): Promise<AgentRun[]>;
   };
+  dogfood: {
+    runPreflight(input: RunDogfoodPreflightInput): Promise<DogfoodPreflightReport>;
+  };
   pullRequests: {
     open(input: OpenPullRequestInput): Promise<PullRequest>;
     list(workstreamId: string): Promise<PullRequest[]>;
@@ -284,6 +309,9 @@ const desktopApi: MergePilotDesktopApi = {
   agents: {
     startBuildRun: (input) => ipcRenderer.invoke("agents:start-build-run", input),
     listRuns: (workstreamId) => ipcRenderer.invoke("agents:list-runs", { workstreamId })
+  },
+  dogfood: {
+    runPreflight: (input) => ipcRenderer.invoke("dogfood:preflight:run", input)
   },
   pullRequests: {
     open: (input) => ipcRenderer.invoke("pull-requests:open", input),

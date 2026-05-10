@@ -380,4 +380,79 @@ describe("orchestrator IPC handlers", () => {
     expect(orchestrator.openPullRequest).not.toHaveBeenCalled();
     expect(orchestrator.listPullRequests).not.toHaveBeenCalled();
   });
+
+  it("runs dogfood preflight through IPC and records sanitized timeline evidence", async () => {
+    const ipc = createFakeIpc();
+    const orchestrator = {
+      start: vi.fn(),
+      stop: vi.fn(),
+      status: vi.fn(),
+      createWorkstream: vi.fn(),
+      listWorkstreams: vi.fn(),
+      getWorkstream: vi.fn(),
+      updateWorkstreamStatus: vi.fn(),
+      appendEvent: vi.fn(async (input) => ({
+        id: "evt-preflight",
+        sequence: 1,
+        createdAt: "2026-05-10T00:00:00.000Z",
+        ...input
+      })),
+      listEvents: vi.fn(),
+      connectGitHubRepository: vi.fn(),
+      listGitHubRepositories: vi.fn(),
+      selectGitHubRepository: vi.fn(),
+      recordGitHubRepositoryConnectionError: vi.fn(),
+      proposePlan: vi.fn(),
+      listPlans: vi.fn(),
+      approvePlan: vi.fn(),
+      rejectPlan: vi.fn(),
+      startBuildAgentRun: vi.fn(),
+      listAgentRuns: vi.fn(),
+      openPullRequest: vi.fn(),
+      listPullRequests: vi.fn(),
+      syncPullRequestReview: vi.fn()
+    };
+
+    registerOrchestratorIpcHandlers(ipc, orchestrator, {
+      runDogfoodPreflight: vi.fn(async () => ({
+        ok: false,
+        cwd: "https://ghp_DO_NOT_PRINT_ME123456789@github.com/owner/repo.git",
+        ranAt: "2026-05-10T00:00:00.000Z",
+        checks: [
+          {
+            id: "github-auth",
+            label: "GitHub CLI auth",
+            status: "fail",
+            detail: "token=DO_NOT_PRINT_ME",
+            remediation: "Run `gh auth login`."
+          }
+        ]
+      }))
+    });
+
+    await expect(
+      ipc.invoke("dogfood:preflight:run", {
+        workstreamId: "ws-1",
+        repo: "ss-andrade/mergepilot"
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      cwd: "https://github.com/owner/repo.git",
+      checks: [{ id: "github-auth", status: "fail", detail: "[redacted]" }]
+    });
+
+    expect(orchestrator.appendEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workstreamId: "ws-1",
+        type: "human_action_required",
+        message: "Dogfood preflight found blockers before build-agent execution.",
+        payload: expect.objectContaining({
+          action: "dogfood_preflight",
+          ok: false,
+          cwd: "https://github.com/owner/repo.git",
+          checks: [expect.objectContaining({ detail: "[redacted]" })]
+        })
+      })
+    );
+  });
 });

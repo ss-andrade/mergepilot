@@ -353,6 +353,35 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
         },
         listRuns: async (workstreamId) => agentRuns.filter((run) => run.workstreamId === workstreamId)
       },
+      dogfood: {
+        runPreflight: async ({ workstreamId, repo }) => {
+          const created: WorkstreamEvent = {
+            id: `event-${sequence + 1}`,
+            workstreamId,
+            sequence: sequence + 1,
+            type: "command_ran",
+            message: "Dogfood preflight passed for selected workstream.",
+            payload: { action: "dogfood_preflight", ok: true, repo },
+            createdAt: now
+          };
+          sequence += 1;
+          events.push(created);
+          return {
+            ok: true,
+            cwd: "/tmp/mergepilot-renderer-mock/worktree",
+            ranAt: now,
+            checks: [
+              { id: "codex", label: "Codex CLI", status: "pass", detail: "codex-cli 1.2.3" },
+              { id: "git", label: "Git", status: "pass", detail: "git version 2.44.0" },
+              { id: "github-cli", label: "GitHub CLI", status: "pass", detail: "gh version 2.71.0" },
+              { id: "github-auth", label: "GitHub CLI auth", status: "pass", detail: "Authenticated for GitHub CLI operations." },
+              { id: "github-origin", label: "GitHub origin remote", status: "pass", detail: "git@github.com:ss-andrade/mergepilot.git" },
+              { id: "writable-worktree", label: "Writable worktree", status: "pass", detail: "Current worktree accepts local writes." },
+              { id: "electron-linux", label: "Electron Linux dependencies", status: "skip", detail: "Only required on Linux hosts." }
+            ] satisfies DogfoodPreflightCheck[]
+          };
+        }
+      },
       pullRequests: {
         open: async ({ workstreamId, agentRunId }) => {
           const workstream = workstreams.find((item) => item.id === workstreamId);
@@ -450,6 +479,13 @@ test("web renderer runs against a mocked mergePilot bridge", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Coordinator plan" })).toContainText("approved");
   await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("plan_approved");
   await expect(page.getByRole("region", { name: "Workstream detail" })).toContainText("running");
+  await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("Preflight has not run for this workstream.");
+  await expect(page.getByRole("button", { name: "Start build agent" })).toBeDisabled();
+  await page.getByRole("button", { name: "Run preflight" }).click();
+  await expect(page.getByLabel("Dogfood preflight panel")).toContainText("Codex CLI");
+  await expect(page.getByLabel("Dogfood preflight panel")).toContainText("warning");
+  await expect(page.getByRole("region", { name: "Event timeline" })).toContainText("Dogfood preflight passed");
+  await expect(page.getByRole("button", { name: "Start build agent" })).toBeEnabled();
   await page.getByRole("button", { name: "Start build agent" }).click();
   await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("completed");
   await expect(page.getByRole("region", { name: "Agent runs" })).toContainText("Mock build agent completed the approved task.");

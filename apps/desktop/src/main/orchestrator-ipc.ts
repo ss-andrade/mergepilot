@@ -14,8 +14,36 @@ import type {
   WorkstreamStatus
 } from "@mergepilot/orchestrator";
 import { WORKSTREAM_EVENT_TYPES } from "@mergepilot/orchestrator";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const workstreamEventTypes = new Set<string>(WORKSTREAM_EVENT_TYPES);
+const secretPattern = /\b(?:ghp|github_pat|gho|ghu|ghs|ghr|sk|xox[baprs])_[A-Za-z0-9_=-]{8,}\b|(?:token|password|secret|authorization|credential)=\S+/gi;
+
+export type DogfoodPreflightStatus = "pass" | "fail" | "skip" | "warning";
+
+export interface DogfoodPreflightCheck {
+  id: string;
+  label: string;
+  status: DogfoodPreflightStatus;
+  detail: string;
+  remediation?: string;
+}
+
+export interface DogfoodPreflightReport {
+  ok: boolean;
+  cwd: string;
+  checks: DogfoodPreflightCheck[];
+  ranAt: string;
+}
+
+export interface RunDogfoodPreflightInput {
+  workstreamId: string;
+  repo: string;
+}
+
+type DogfoodPreflightRunner = (input: RunDogfoodPreflightInput) => Promise<DogfoodPreflightReport>;
 
 export interface OrchestratorIpc {
   handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
@@ -51,8 +79,11 @@ export function registerOrchestratorIpcHandlers(
     | "syncPullRequestReview"
     | "appendEvent"
     | "listEvents"
-  >
+  >,
+  options: { runDogfoodPreflight?: DogfoodPreflightRunner } = {}
 ): void {
+  const runDogfoodPreflight = options.runDogfoodPreflight ?? defaultRunDogfoodPreflight;
+
   ipc.handle("orchestrator:start", async () => {
     await orchestrator.start();
     return orchestrator.status();
@@ -114,6 +145,32 @@ export function registerOrchestratorIpcHandlers(
 
   ipc.handle("agents:start-build-run", (_event, rawInput) => {
     return orchestrator.startBuildAgentRun(parseStartBuildAgentRunInput(rawInput));
+  });
+
+  ipc.handle("dogfood:preflight:run", async (_event, rawInput) => {
+    const input = parseRunDogfoodPreflightInput(rawInput);
+    const report = sanitizeDogfoodPreflightReport(await runDogfoodPreflight(input));
+    await orchestrator.appendEvent({
+      workstreamId: input.workstreamId,
+      type: report.ok ? "command_ran" : "human_action_required",
+      message: report.ok
+        ? "Dogfood preflight passed for selected workstream."
+        : "Dogfood preflight found blockers before build-agent execution.",
+      payload: {
+        surface: "desktop",
+        action: "dogfood_preflight",
+        ok: report.ok,
+        cwd: report.cwd,
+        checks: report.checks.map((check) => ({
+          id: check.id,
+          status: check.status,
+          label: check.label,
+          detail: check.detail,
+          remediation: check.remediation
+        }))
+      }
+    });
+    return report;
   });
 
   ipc.handle("agents:list-runs", (_event, rawInput) => {
@@ -277,6 +334,14 @@ function parseAppendEventInput(rawInput: unknown): AppendWorkstreamEventInput {
   return parsed;
 }
 
+function parseRunDogfoodPreflightInput(rawInput: unknown): RunDogfoodPreflightInput {
+  const input = requireRecord(rawInput);
+  return {
+    workstreamId: parseIdInput(input.workstreamId, "workstreamId"),
+    repo: requireBoundedString(input.repo, "repo", 2048)
+  };
+}
+
 function parseIdInput(rawInput: unknown, field: string): string {
   const value = typeof rawInput === "object" && rawInput !== null && field in rawInput
     ? (rawInput as Record<string, unknown>)[field]
@@ -406,4 +471,58 @@ function isJsonCompatible(value: unknown, seen: Set<object>): boolean {
   }
 
   return Object.values(value as Record<string, unknown>).every((item) => isJsonCompatible(item, seen));
+}
+
+async function defaultRunDogfoodPreflight(input: RunDogfoodPreflightInput): Promise<DogfoodPreflightReport> {
+  const scriptUrl = pathToFileURL(path.resolve(process.cwd(), "scripts/preflight-dogfood.mjs")).href;
+  const module = await import(scriptUrl) as {
+    buildDogfoodPreflightReport(options: { cwd: string }): Promise<Omit<DogfoodPreflightReport, "ranAt">>;
+  };
+  const report = await module.buildDogfoodPreflightReport({
+    cwd: resolvePreflightCwd(input.repo)
+  });
+  return {
+    ...report,
+    ranAt: new Date().toISOString()
+  };
+}
+
+function resolvePreflightCwd(repo: string): string {
+  if (path.isAbsolute(repo)) {
+    return repo;
+  }
+
+  const candidate = path.resolve(process.cwd(), repo);
+  if (repo.startsWith(".") || existsSync(candidate)) {
+    return candidate;
+  }
+
+  return process.cwd();
+}
+
+function sanitizeDogfoodPreflightReport(report: DogfoodPreflightReport): DogfoodPreflightReport {
+  return {
+    ok: Boolean(report.ok),
+    cwd: sanitizeText(report.cwd),
+    ranAt: report.ranAt || new Date().toISOString(),
+    checks: Array.isArray(report.checks)
+      ? report.checks.map((check) => ({
+          id: sanitizeText(check.id).slice(0, 128),
+          label: sanitizeText(check.label).slice(0, 160),
+          status: normalizePreflightStatus(check.status),
+          detail: sanitizeText(check.detail || "Check completed.").slice(0, 500),
+          ...(check.remediation ? { remediation: sanitizeText(check.remediation).slice(0, 500) } : {})
+        }))
+      : []
+  };
+}
+
+function normalizePreflightStatus(status: unknown): DogfoodPreflightStatus {
+  return status === "pass" || status === "fail" || status === "skip" || status === "warning" ? status : "warning";
+}
+
+function sanitizeText(value: unknown): string {
+  return String(value ?? "")
+    .replace(secretPattern, "[redacted]")
+    .replace(/^https:\/\/[^@\s]+@/i, "https://");
 }
