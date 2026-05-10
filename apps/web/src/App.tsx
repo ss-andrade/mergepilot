@@ -1,5 +1,6 @@
 import {
   ActivityIcon,
+  AlertTriangleIcon,
   BellIcon,
   BotIcon,
   CheckCircle2Icon,
@@ -17,6 +18,7 @@ import {
   SparklesIcon,
   SquareIcon,
   SunIcon,
+  XCircleIcon,
   WorkflowIcon
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
@@ -55,6 +57,12 @@ interface AgentRunState {
 interface PullRequestState {
   selectedWorkstreamId: string | null;
   pullRequests: PullRequest[];
+}
+
+interface PreflightState {
+  selectedWorkstreamId: string | null;
+  report: DogfoodPreflightReport | null;
+  running: boolean;
 }
 
 interface WorkstreamFormState {
@@ -150,6 +158,7 @@ export function App() {
   const [planState, setPlanState] = useState<PlanState>({ selectedWorkstreamId: null, plans: [] });
   const [agentRunState, setAgentRunState] = useState<AgentRunState>({ selectedWorkstreamId: null, runs: [] });
   const [pullRequestState, setPullRequestState] = useState<PullRequestState>({ selectedWorkstreamId: null, pullRequests: [] });
+  const [preflightState, setPreflightState] = useState<PreflightState>({ selectedWorkstreamId: null, report: null, running: false });
   const [error, setError] = useState<string | null>(null);
   const [humanAttentionMessage, setHumanAttentionMessage] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
@@ -168,6 +177,8 @@ export function App() {
   const currentPlan = selectedWorkstream
     ? planState.plans.find((plan) => plan.status === "draft") ?? planState.plans.at(-1) ?? null
     : null;
+  const selectedPreflightReport = selectedWorkstream && preflightState.selectedWorkstreamId === selectedWorkstream.id ? preflightState.report : null;
+  const buildAgentBlocked = Boolean(selectedWorkstream && selectedWorkstream.status === "running" && !selectedPreflightReport?.ok);
 
   useEffect(() => {
     window.mergePilot.getRuntimeInfo().then(setRuntimeInfo).catch(() => {
@@ -201,6 +212,7 @@ export function App() {
       setPlanState({ selectedWorkstreamId: null, plans: [] });
       setAgentRunState({ selectedWorkstreamId: null, runs: [] });
       setPullRequestState({ selectedWorkstreamId: null, pullRequests: [] });
+      setPreflightState({ selectedWorkstreamId: null, report: null, running: false });
       return;
     }
 
@@ -326,6 +338,9 @@ export function App() {
     setPlanState({ selectedWorkstreamId: workstreamId, plans });
     setAgentRunState({ selectedWorkstreamId: workstreamId, runs });
     setPullRequestState({ selectedWorkstreamId: workstreamId, pullRequests });
+    if (preflightState.selectedWorkstreamId !== workstreamId) {
+      setPreflightState({ selectedWorkstreamId: workstreamId, report: null, running: false });
+    }
     setSidebarOpen(false);
   }
 
@@ -366,12 +381,39 @@ export function App() {
 
   async function startBuildAgentRun(workstreamId: string) {
     setError(null);
+    const currentPreflight = preflightState.selectedWorkstreamId === workstreamId ? preflightState.report : null;
+    if (!currentPreflight?.ok) {
+      setHumanAttentionMessage("Run and pass dogfood preflight before starting the build agent.");
+      return;
+    }
     try {
       const run = await window.mergePilot.agents.startBuildRun({ workstreamId });
       setHumanAttentionMessage(run.status === "completed" ? "Build agent finished and the workstream is ready for review." : `Build agent ${run.status}.`);
       await refreshOrchestrator(workstreamId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to start build agent run.");
+    }
+  }
+
+  async function runDogfoodPreflight(workstream: Workstream) {
+    setError(null);
+    setHumanAttentionMessage(null);
+    setPreflightState({ selectedWorkstreamId: workstream.id, report: preflightState.selectedWorkstreamId === workstream.id ? preflightState.report : null, running: true });
+    try {
+      const report = await window.mergePilot.dogfood.runPreflight({
+        workstreamId: workstream.id,
+        repo: workstream.repo
+      });
+      setPreflightState({ selectedWorkstreamId: workstream.id, report, running: false });
+      setHumanAttentionMessage(
+        report.ok
+          ? "Dogfood preflight passed. Build-agent execution is available."
+          : "Dogfood preflight found blockers. Fix failed checks before build-agent execution."
+      );
+      await refreshOrchestrator(workstream.id);
+    } catch (caught) {
+      setPreflightState({ selectedWorkstreamId: workstream.id, report: null, running: false });
+      setError(caught instanceof Error ? caught.message : "Unable to run dogfood preflight.");
     }
   }
 
@@ -830,12 +872,25 @@ export function App() {
                   <h3>Agent runs</h3>
                 </div>
                 {selectedWorkstream?.status === "running" ? (
-                  <Button variant="secondary" onClick={() => void startBuildAgentRun(selectedWorkstream.id)}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void startBuildAgentRun(selectedWorkstream.id)}
+                    disabled={buildAgentBlocked}
+                    title={buildAgentBlocked ? "Run and pass dogfood preflight before starting a build agent." : undefined}
+                  >
                     <BotIcon aria-hidden="true" />
                     Start build agent
                   </Button>
                 ) : null}
               </div>
+              {selectedWorkstream ? (
+                <DogfoodPreflightPanel
+                  report={selectedPreflightReport}
+                  running={preflightState.running && preflightState.selectedWorkstreamId === selectedWorkstream.id}
+                  workstream={selectedWorkstream}
+                  onRun={() => void runDogfoodPreflight(selectedWorkstream)}
+                />
+              ) : null}
               {agentRunState.runs.length > 0 ? (
                 <div className="mp-agent-run-list">
                   {agentRunState.runs.map((run) => (
@@ -1005,6 +1060,72 @@ export function App() {
       />
     </main>
   );
+}
+
+function DogfoodPreflightPanel({
+  onRun,
+  report,
+  running,
+  workstream
+}: {
+  onRun: () => void;
+  report: DogfoodPreflightReport | null;
+  running: boolean;
+  workstream: Workstream;
+}) {
+  return (
+    <div className="mp-preflight-card" aria-label="Dogfood preflight panel">
+      <div className="mp-section-heading">
+        <div>
+          <p className="mp-eyebrow">Dogfood preflight</p>
+          <h4>Local readiness checks</h4>
+        </div>
+        <Button variant="outline" onClick={onRun} disabled={running}>
+          <ShieldCheckIcon aria-hidden="true" />
+          {running ? "Running..." : "Run preflight"}
+        </Button>
+      </div>
+      <p className="mp-preflight-copy">
+        {report
+          ? `Last run ${formatDate(report.ranAt)} for ${report.cwd}.`
+          : `Run checks before build-agent execution for ${workstream.repo}.`}
+      </p>
+      {report ? (
+        <>
+          <div className="mp-preflight-summary">
+            <Badge tone={report.ok ? "success" : "danger"}>{report.ok ? "ready" : "blocked"}</Badge>
+            <span>{report.ok ? "Critical checks passed." : "Build-agent execution is guarded until failed checks pass."}</span>
+          </div>
+          <div className="mp-preflight-list">
+            {report.checks.map((check) => (
+              <div className="mp-preflight-row" data-status={check.status} key={check.id}>
+                {check.status === "pass" ? <CheckCircle2Icon aria-hidden="true" /> : check.status === "fail" ? <XCircleIcon aria-hidden="true" /> : <AlertTriangleIcon aria-hidden="true" />}
+                <div>
+                  <div className="mp-preflight-row__title">
+                    <strong>{check.label}</strong>
+                    <Badge tone={getPreflightTone(check.status)}>{check.status === "skip" ? "warning" : check.status}</Badge>
+                  </div>
+                  <p>{check.detail}</p>
+                  {check.remediation ? <small>{check.remediation}</small> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="mp-preflight-empty">
+          <AlertTriangleIcon aria-hidden="true" />
+          <span>Preflight has not run for this workstream.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function getPreflightTone(status: DogfoodPreflightStatus): "danger" | "success" | "warning" {
+  if (status === "pass") return "success";
+  if (status === "fail") return "danger";
+  return "warning";
 }
 
 function PlanList({ items, ordered = false, title }: { items: string[]; ordered?: boolean; title: string }) {

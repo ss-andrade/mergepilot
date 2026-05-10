@@ -162,6 +162,28 @@ interface StartBuildAgentRunInput {
   planId?: string;
 }
 
+type DogfoodPreflightStatus = "pass" | "fail" | "skip" | "warning";
+
+interface DogfoodPreflightCheck {
+  id: string;
+  label: string;
+  status: DogfoodPreflightStatus;
+  detail: string;
+  remediation?: string;
+}
+
+interface DogfoodPreflightReport {
+  ok: boolean;
+  cwd: string;
+  checks: DogfoodPreflightCheck[];
+  ranAt: string;
+}
+
+interface RunDogfoodPreflightInput {
+  workstreamId: string;
+  repo: string;
+}
+
 interface PullRequest {
   id: string;
   workstreamId: string;
@@ -236,6 +258,9 @@ interface MergePilotDesktopApi {
   agents: {
     startBuildRun(input: StartBuildAgentRunInput): Promise<AgentRun>;
     listRuns(workstreamId: string): Promise<AgentRun[]>;
+  };
+  dogfood: {
+    runPreflight(input: RunDogfoodPreflightInput): Promise<DogfoodPreflightReport>;
   };
   pullRequests: {
     open(input: OpenPullRequestInput): Promise<PullRequest>;

@@ -120,4 +120,51 @@ describe("dogfood preflight", () => {
     assert.doesNotMatch(output, /Dogfood preflight failed unexpectedly/);
     assert.doesNotMatch(output, /ENOENT/);
   });
+
+  it("sanitizes tokens from successful details and injected check output", async () => {
+    const runner = fakeRunner({
+      "codex --version": success("codex-cli token=DO_NOT_PRINT_ME\n"),
+      "git --version": success("git version 2.44.0\n"),
+      "gh --version": success("gh version 2.71.0\n"),
+      "gh auth status": success("github.com\n"),
+      "git remote get-url origin": success("https://ghp_DO_NOT_PRINT_ME123456789@github.com/owner/repo.git\n"),
+    });
+
+    const report = await buildDogfoodPreflightReport({
+      cwd: "/repo",
+      runner: runner.run,
+      electronPreflight: async () => ({
+        status: "fail",
+        detail: "Missing dependency with password=DO_NOT_PRINT_ME",
+        remediation: "Run safe package guidance.",
+      }),
+      canWriteWorktree: async () => true,
+    });
+    const output = formatDogfoodPreflightReport(report);
+
+    assert.doesNotMatch(output, /DO_NOT_PRINT_ME/);
+    assert.match(output, /\[redacted\]/);
+    assert.match(output, /https:\/\/github\.com\/owner\/repo\.git/);
+  });
+
+  it("fails when the GitHub origin does not match the expected repository", async () => {
+    const runner = fakeRunner({
+      "codex --version": success("codex-cli 1.0.0\n"),
+      "git --version": success("git version 2.44.0\n"),
+      "gh --version": success("gh version 2.71.0\n"),
+      "gh auth status": success("github.com\n"),
+      "git remote get-url origin": success("https://github.com/other/repo.git\n"),
+    });
+
+    const report = await buildDogfoodPreflightReport({
+      cwd: "/repo",
+      expectedRepo: "owner/repo",
+      runner: runner.run,
+      electronPreflight: async () => ({ status: "skip", detail: "Only required on Linux hosts." }),
+      canWriteWorktree: async () => true,
+    });
+
+    assert.equal(report.ok, false);
+    assert.match(formatDogfoodPreflightReport(report), /other\/repo, not owner\/repo/);
+  });
 });

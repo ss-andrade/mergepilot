@@ -675,6 +675,96 @@ kbd {
   background: var(--warning-bg);
 }
 
+.mp-preflight-card {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-strong);
+}
+
+.mp-preflight-card h4 {
+  margin: 0;
+  font-size: 0.94rem;
+  line-height: 1.2;
+}
+
+.mp-preflight-copy,
+.mp-preflight-row p,
+.mp-preflight-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
+.mp-preflight-summary,
+.mp-preflight-empty,
+.mp-preflight-row,
+.mp-preflight-row__title {
+  display: flex;
+  align-items: center;
+}
+
+.mp-preflight-summary,
+.mp-preflight-empty {
+  gap: 9px;
+}
+
+.mp-preflight-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.mp-preflight-row {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px;
+}
+
+.mp-preflight-row + .mp-preflight-row {
+  border-top: 1px solid var(--border);
+}
+
+.mp-preflight-row > svg {
+  margin-top: 2px;
+  color: var(--warning);
+}
+
+.mp-preflight-row[data-status="pass"] > svg {
+  color: var(--success);
+}
+
+.mp-preflight-row[data-status="fail"] > svg {
+  color: var(--danger);
+}
+
+.mp-preflight-row > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mp-preflight-row__title {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mp-preflight-row__title strong,
+.mp-preflight-row p,
+.mp-preflight-row small,
+.mp-preflight-copy {
+  overflow-wrap: anywhere;
+}
+
+.mp-preflight-row small {
+  color: var(--foreground);
+}
+
 .mp-timeline__list {
   display: grid;
   overflow: hidden;

@@ -193,7 +193,14 @@ describe("orchestrator IPC handlers", () => {
       }))
     };
 
-    registerOrchestratorIpcHandlers(ipc, orchestrator);
+    registerOrchestratorIpcHandlers(ipc, orchestrator, {
+      runDogfoodPreflight: vi.fn(async () => ({
+        ok: true,
+        cwd: "/tmp/mergepilot",
+        ranAt: "2026-05-10T00:00:00.000Z",
+        checks: [{ id: "git", label: "Git", status: "pass", detail: "git version 2.44.0" }]
+      }))
+    });
 
     await expect(ipc.invoke("orchestrator:start")).resolves.toMatchObject({ state: "running", dataDir: "/tmp/data" });
     await expect(
@@ -248,6 +255,12 @@ describe("orchestrator IPC handlers", () => {
     await expect(
       ipc.invoke("plans:reject", { workstreamId: "ws-1", planId: "plan-1", reason: "Needs edits." })
     ).resolves.toMatchObject({ id: "plan-1", status: "rejected" });
+    await expect(
+      ipc.invoke("dogfood:preflight:run", {
+        workstreamId: "ws-1",
+        repo: "ss-andrade/mergepilot"
+      })
+    ).resolves.toMatchObject({ ok: true });
     await expect(ipc.invoke("agents:start-build-run", { workstreamId: "ws-1" })).resolves.toMatchObject({
       id: "run-1",
       status: "completed",
@@ -379,5 +392,82 @@ describe("orchestrator IPC handlers", () => {
     expect(orchestrator.startBuildAgentRun).not.toHaveBeenCalled();
     expect(orchestrator.openPullRequest).not.toHaveBeenCalled();
     expect(orchestrator.listPullRequests).not.toHaveBeenCalled();
+  });
+
+  it("runs dogfood preflight through IPC and records sanitized timeline evidence", async () => {
+    const ipc = createFakeIpc();
+    const orchestrator = {
+      start: vi.fn(),
+      stop: vi.fn(),
+      status: vi.fn(),
+      createWorkstream: vi.fn(),
+      listWorkstreams: vi.fn(),
+      getWorkstream: vi.fn(),
+      updateWorkstreamStatus: vi.fn(),
+      appendEvent: vi.fn(async (input) => ({
+        id: "evt-preflight",
+        sequence: 1,
+        createdAt: "2026-05-10T00:00:00.000Z",
+        ...input
+      })),
+      listEvents: vi.fn(),
+      connectGitHubRepository: vi.fn(),
+      listGitHubRepositories: vi.fn(),
+      selectGitHubRepository: vi.fn(),
+      recordGitHubRepositoryConnectionError: vi.fn(),
+      proposePlan: vi.fn(),
+      listPlans: vi.fn(),
+      approvePlan: vi.fn(),
+      rejectPlan: vi.fn(),
+      startBuildAgentRun: vi.fn(),
+      listAgentRuns: vi.fn(),
+      openPullRequest: vi.fn(),
+      listPullRequests: vi.fn(),
+      syncPullRequestReview: vi.fn()
+    };
+
+    registerOrchestratorIpcHandlers(ipc, orchestrator, {
+      runDogfoodPreflight: vi.fn(async () => ({
+        ok: false,
+        cwd: "https://ghp_DO_NOT_PRINT_ME123456789@github.com/owner/repo.git",
+        ranAt: "2026-05-10T00:00:00.000Z",
+        checks: [
+          {
+            id: "github-auth",
+            label: "GitHub CLI auth",
+            status: "fail",
+            detail: "token=DO_NOT_PRINT_ME",
+            remediation: "Run `gh auth login`."
+          }
+        ]
+      }))
+    });
+
+    await expect(
+      ipc.invoke("dogfood:preflight:run", {
+        workstreamId: "ws-1",
+        repo: "ss-andrade/mergepilot"
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      cwd: "https://github.com/owner/repo.git",
+      checks: [{ id: "github-auth", status: "fail", detail: "[redacted]" }]
+    });
+
+    expect(orchestrator.appendEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workstreamId: "ws-1",
+        type: "human_action_required",
+        message: "Dogfood preflight found blockers before build-agent execution.",
+        payload: expect.objectContaining({
+          action: "dogfood_preflight",
+          ok: false,
+          cwd: "https://github.com/owner/repo.git",
+          checks: [expect.objectContaining({ detail: "[redacted]" })]
+        })
+      })
+    );
+    await expect(ipc.invoke("agents:start-build-run", { workstreamId: "ws-1" })).rejects.toThrow(/preflight/i);
+    expect(orchestrator.startBuildAgentRun).not.toHaveBeenCalled();
   });
 });
